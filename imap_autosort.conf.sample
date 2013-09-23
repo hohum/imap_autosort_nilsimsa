@@ -1,0 +1,32 @@
+[imap]
+server=your.server
+username=your.username
+password=your.password
+# folders: comma delimited list of imap folders to which inbox email should be sorted in to
+folders=inbox
+# todo: folder that autosort analyses
+todo=inbox/autosort
+# new: where to put emails autosort doesn't recognise
+new=inbox/autosort/new
+
+[archive]
+# the script can automatically archive your mail for you
+# specify which folder and after how many days email should
+# be archived
+folder=Archive
+after=90
+# justdelete: don't archive these
+justdelete=
+# trash: folder to move trash to
+trash=Trash
+
+[nilsimsa]
+threshold=70
+min_score=10
+weight_headers=X-.*,List-.*
+weight_headers_by=3
+
+[general]
+maintenance=0
+logfile=imap_autosort.log
+reconsider_after=3600

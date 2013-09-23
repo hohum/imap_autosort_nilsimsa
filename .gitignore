@@ -1,0 +1,7 @@
+.*
+*.log
+log_archive.tar.gz
+imap_autosort.conf
+report.pl
+nilsimsa/__init__.pyc
+stats/*
