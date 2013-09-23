@@ -1,0 +1,10 @@
+[imap]
+server=your.server
+username=your.username
+password=your.password
+# comma delimited list of imap folders to which inbox email should be sorted in to
+folders=
+
+[nilsimsa]
+# for me match_threshold of 80 gives me excellent results but you can play with it
+match_threshold=80
