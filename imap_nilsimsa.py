@@ -6,6 +6,7 @@ config = configparser.ConfigParser()
 config.read('imap_autosort.conf')
 
 imap_folders = [x.strip() for x in config['imap']['folders'].split(',')]
+threshold = float(config['nilsimsa']['match_threshold'])
 
 def load_hexdigest(folder,debug=False):
     if folder not in digests.keys(): digests[ folder ] = {}
@@ -58,28 +59,30 @@ def autosort_inbox(folders,debug=False):
             sum = 0.0
             count = 0.0
             for target_hexdigest in digests[ folder ].values():
-                match = compare_hexdigests(source_hexdigest, target_hexdigest)
-                if match >= 80:
+                distance = compare_hexdigests(source_hexdigest, target_hexdigest)
+                if distance >= threshold:
                     if debug:
-                        print ('folder: {} match {} is over 80'.format(folder,match))
-                    # the idea is that the higher it is over 80, the more likely it is a match
-                    # but if there's a lot of matches, that should count also
-                    sum += 1 + match - float(config['nilsimsa']['match_threshold']) # the +1 ensures that one score of config['nilsimsa']['match_threshold'] is valid)
+                        print ('folder: {} match {} is over 80'.format(folder,distance))
+                    # the score should always be out of 100
+                    # I want to weight higher matches parabolically
+                    score = 100 * (distance - threshold) / (threshold ** 2) 
+                    sum += score
                     count += 1
-                    msg = email.message_from_string( raw_header )
                     
                     # for debugging
                     if debug:
+                        msg = email.message_from_string( raw_header )
                         print("  Source: subject: {}".format(msg['Subject']))
                         print("  Source: from: {}".format(msg['From']))
                         print("  Source: to: {}".format(msg['To']))
             if count > 0:
                     scores [ folder ] = sum
-                    print ('{} messages scored over 80 in folder {} - sum = {}'.format(count,folder,sum))
+                    average = sum / count
+                    print ('{} messages scored over 80 in folder {} - sum = {}, average = {}'.format(count,folder,sum,average))
             
         # which folder is the winner?
         winner = max(scores, key=scores.get)
-        if scores [ winner ] > 0.0:
+        if scores [ winner ] > 0.0: # there's a fringe case where distance = threshold so the score is zero - will fight another day
             result = mail.uid('COPY', email_uid, '"'+ winner +'"')
             if result[0] == 'OK':
                 mov, data = mail.uid('STORE', email_uid , '+FLAGS', '(\Deleted)')
