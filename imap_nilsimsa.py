@@ -60,12 +60,12 @@ def autosort_inbox(folders,debug=False):
             count = 0.0
             for target_hexdigest in digests[ folder ].values():
                 distance = compare_hexdigests(source_hexdigest, target_hexdigest)
-                if distance >= threshold:
+                if distance > threshold:
                     if debug:
                         print ('folder: {} match {} is over 80'.format(folder,distance))
                     # the score should always be out of 100
                     # I want to weight higher matches parabolically
-                    score = 100 * (distance - threshold) / (threshold ** 2) 
+                    score = ( 10 * (distance - threshold) / ( 128 - threshold )) ** 2 
                     sum += score
                     count += 1
                     
