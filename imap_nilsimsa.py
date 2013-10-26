@@ -5,193 +5,208 @@ from optparse import OptionParser
 config = configparser.ConfigParser()
 config.read('imap_autosort.conf')
 
-imap_folders = [x.strip() for x in config['imap']['folders'].split(',')]
-threshold = float(config['nilsimsa']['match_threshold'])
-sqlite3_db = '.imap_nilsimsa.db'
-twirly = ('|','/','-','\\')
+imap_folders=[x.strip() for x in config['imap']['folders'].split(',')]
+threshold=float(config['nilsimsa']['match_threshold'])
+sqlite3_db='.imap_nilsimsa.db'
+considered=[]
 
 def status(num,max,message=''):
-    if not max: return
-    percent = int(100*int(num)/int(max)+1)
+    # takes range argument so 10 elements would be 0..9
+    if (max-1)<1: return
+    percent = int(100*int(num)/int(max-1)+0.5)
     num_equals=int(percent/2)
-    sys.stdout.write("%s [%-50s] %3d%%\r" % (message,'=' * num_equals,percent))
+    sys.stdout.write("%s [%-50s] %3d%% %s/%s\r" % (message,'=' * num_equals,percent,(num+1),max))
+    if num==(max-1):
+        print ""
     sys.stdout.flush()
-
-def load_hexdigest(folder,debug=False):
-    mail.select( '"'+folder+'"', readonly = True ) # connect to inbox.
     
-    # get email_uids for this folder
-    result, data = mail.uid('search', None, "ALL")
-    email_uids = data[0].decode().split()
+def sync_and_score(folder,source_hexdigest,dry_run=False,debug=False,quiet=False):
+    if not quiet:
+        print "Analysing folder %s" % folder
+    # this function has 3 goals
+    # by traversing the sqlite db (which in effect is acting as a cache)
+    # and traversing the imap folder
+    # 1) sync imap folder with squlite db
+    # 2) return the folder's score
 
-    # if an email has been deleted or moved from the imap folder, remove it from the db
-    del_cursor = db_connect.cursor()
-    del_cursor.execute('select id,uid from nilsimsa where folder=?',[folder])
-    count = 0
-    for row in del_cursor:
-        # this is pretty annoying - fixme
-        sys.stdout.write("Deletion anaylsis %s count=%6d\r" % (twirly[count % 4],count))
-        sys.stdout.flush()
-        count += 1
-        
-        if str(row[1]) not in email_uids:
-            if debug:
-                print ("removing uid: {} from folder: {} id: {}".format(row[1],folder,row[0]))
-            cursor.execute('delete from nilsimsa where id=?',[row[0]])
-    print()
-
-    uid_count = len(email_uids)
-    for i in range(uid_count):
-        status(i,uid_count,'examining')
-        continue
-        email_uid = email_uids[i]
-        # if we've seen this email_uid already, continue
-        cursor.execute('select count(*) from nilsimsa where folder=? and uid=?',[folder,email_uid])
-        row = cursor.fetchone()
-        if row[0] != 0:
-            if debug:
-                print ("uid: {} seen - skipping".format(email_uid))
-            continue
-        else:
-            print ("processing uid: {}".format(email_uid))
-        
-        # process header
-        result, data = mail.uid('fetch', email_uid, '(BODY.PEEK[HEADER])')
-        raw_header = data[0][1].decode('latin-1')
-        try:
-            nilsimsa = Nilsimsa( raw_header )
-        except:
-            continue
-        hexdigest = nilsimsa.hexdigest()
+    #init
+    mail={}
+    score=0.0
+    scored_count=0
+    # load the sqlite3 into a hash for this folder
+    cursor.execute("select uid,hexdigest from nilsimsa where folder=?",[folder])
+    for row in cursor:
+        mail[row[0]]=row[1]
+    # get the email_uids for folder
+    imap.select('"'+folder+'"',readonly=False)
+    result,data=imap.uid('search', None, "ALL")
+    email_uids=[int(x) for x in data[0].decode().split()]
+    # iterate through the email_ids
+    message_count=len(email_uids)
+    for i in range(message_count):
+        email_uid=email_uids[i]
+        if not quiet:
+            status(i,message_count,'comparing')
         if debug:
-            print ("{}: {}: {}".format(folder, email_uid, hexdigest))
-        cursor.execute('insert into nilsimsa (uid,folder,hexdigest) values(?,?,?)',[email_uid,folder,hexdigest])
-    db_connect.commit()
+            print "folder: %s email_uid: %s" % (folder,email_uid)
+        # do we already know about this email?
+        if not mail.has_key(email_uid):
+            if debug:
+                print "email_uid %s not in db: " % (email_uid)
+            # get the email header
+            result, data = imap.uid('fetch', email_uid, '(BODY.PEEK[HEADER])')
+            raw_header = data[0][1]
+            # compute the hexdigest & get the distance
+            try:
+                nilsimsa=Nilsimsa(raw_header)
+            except:
+                # if we can't get the hex digest, there's no point continuing 
+                continue
+            target_hexdigest = nilsimsa.hexdigest()
+            # store in the db
+            if debug:
+                print "storing email_uid %s into db" % email_uid
+            cursor.execute('insert into nilsimsa (uid,folder,hexdigest) values (?,?,?)',[email_uid,folder,target_hexdigest])
+            db_connect.commit()
+        else:
+            if debug:
+                print "email_uid %s in db, removing from deletion" % email_uid
+            # yay - we know, we can simply compare...
+            target_hexdigest=mail[email_uid]
+            # because this is email_uid is known to the db, remove it from the dictionary
+            # as we want to be left with only email_uids that are no longer in the IMAP folder
+            del mail[email_uid]
+        # calculate the nilsimsa distance
+        distance=compare_hexdigests(source_hexdigest,target_hexdigest)
+        # calculate the score
+        if distance > threshold:
+            # the score should always be out of 100
+            # I want to weight higher matches parabolically
+            this_score=(10*(distance-threshold)/(128-threshold))**2
+            score+=this_score 
+            scored_count+=1
+            if debug:
+                print "Score: %s count: %s" % (this_score,scored_count)
+        else:
+            if debug:
+                print "no score, distance %s less than threshold %s" % (distance,threshold)
+        
+    # now mail should only have items in it that have been deleted from the imap folder
+    # let's get them out of our db
+    leftovers=mail.keys()
+    num_leftovers=len(leftovers)
+    for i in range(num_leftovers):
+        email_uid=leftovers[i]
+        if not quiet:
+            status(i,num_leftovers,'deleting moved messages')
+        if not dry_run:
+            cursor.execute('delete from nilsimsa where uid=? and folder=?',[email_uid,folder])
+            db_connect.commit()
+        else:
+            if dry_run:
+                print "Dry run: would have deleted db entry uid: %s, folder: %s" % (email_uid,folder)
+    
+    # return the score for this folder
+    if scored_count:
+        average=score/scored_count
+    else:
+        average='n/a: no nothing over threshold'
+    if not quiet:
+        print "Score for folder %s=%s, average=%s" % (folder,score,average)
+    return score
 
-def autosort_inbox(folders,debug=False):
-    mail.select('inbox', readonly = False)
-    result, data = mail.uid('search', None, "(UNSEEN)")
-    for email_uid in data[0].decode().split():
-        print ("Considering inbox uid {}".format(email_uid))
-        # get the nilsimsa hexdigest of this unread message
-        result, data = mail.uid('fetch', email_uid, '(BODY.PEEK[HEADER])')
-        raw_header = data[0][1].decode('latin-1')
-        msg = email.message_from_string( raw_header )
+def autosort_inbox(folders,dry_run=False,debug=False,quiet=False):
+    global considered # yuck
+    imap.select('inbox', readonly = False)
+    result, data = imap.uid('search', None, "(UNSEEN)")
+    email_uids=[int(x) for x in data[0].decode().split()]
+    # clean considered
+    considered=[x for x in considered if x in email_uids]
+    for email_uid in email_uids:
+        # don't consider unread email we weren't previously able to move
+        if email_uid in considered:
+            if not quiet:
+                print "Already considered email_uid %s" % email_uid
+            continue
+        if not quiet:
+            print "\nAnalysing unread inbox message %s" % email_uid
+        # get the nilsimsa hexdigest of the header of this unread message    
+        imap.select('inbox', readonly = False)
+        result,data=imap.uid('fetch', email_uid, '(BODY.PEEK[HEADER])')
+        if debug:
+            print "result: %s data: %s" % (result,data)
         try:
-            print("  Source: subject: {}".format(msg['Subject']))
+            raw_header=data[0][1]
         except:
-            print( "Can't print the subject.  Python 2?" )
-            pass
+            print "Error: email_uid: %s has no data" % email_uid
+            continue
+        msg=email.message_from_string( raw_header )
+        if not quiet:
+            print "  Source: subject: %s" % msg['Subject']
         try:
-            print("  Source: from: {}".format(msg['From']))
+            nilsimsa=Nilsimsa(raw_header)
         except:
-            print( "Can't print the subject.  Python 2?" )
-            pass
-        try:
-            print("  Source: to: {}".format(msg['To']))
-        except:
-            print( "Can't print the subject.  Python 2?" )
-            pass
-        try:
-            nilsimsa = Nilsimsa( raw_header )
-        except:
+            # if we can't get the hex digest, there's no point continuing 
             continue
         source_hexdigest = nilsimsa.hexdigest()
-        
-        # get averages of all scores over threshold
-        scores = {}
-        for folder in folders: scores[ folder ] = 0.0
+        # get the score for each imap folder & select the winnig imap account (if any)
+        winning_folder=None
+        winning_score=0
         for folder in folders:
-            sum = 0.0
-            count = 0.0
-            cursor.execute('select hexdigest from nilsimsa where folder=?',[folder])
-            for row in cursor:
-                distance = compare_hexdigests(source_hexdigest, row[0])
-                if distance > threshold:
-                    if debug:
-                        print ('folder: {} match {} is over {}'.format(folder,distance,threshold))
-                    # the score should always be out of 100
-                    # I want to weight higher matches parabolically
-                    score = ( 10 * (distance - threshold) / ( 128 - threshold )) ** 2 
-                    sum += score
-                    count += 1
-                    
-                    # for debugging
-                    if debug:
-                        msg = email.message_from_string( raw_header )
-                        try:
-                            print("  Source: subject: {}".format(msg['Subject']))
-                        except:
-                            print( "Can't print the subject.  Python 2?" )
-                            pass
-                        try:
-                            print("  Source: from: {}".format(msg['From']))
-                        except:
-                            print( "Can't print the subject.  Python 2?" )
-                            pass
-                        try:
-                            print("  Source: to: {}".format(msg['To']))
-                        except:
-                            print( "Can't print the subject.  Python 2?" )
-                            pass
-            if count > 0:
-                    scores [ folder ] = sum
-                    average = sum / count
-                    print ('{} messages scored over {} in folder {} - sum = {}, average = {}'.format(count,threshold,folder,sum,average))
-            
-        # which folder is the winner?
-        winner = max(scores, key=scores.get)
-        if scores [ winner ] > 0.0: # there's a fringe case where distance = threshold so the score is zero - will fight another day
-            result = mail.uid('COPY', email_uid, '"'+ winner +'"')
-            if result[0] == 'OK':
-                mov, data = mail.uid('STORE', email_uid , '+FLAGS', '(\Deleted)')
-                mail.expunge()
-                print ("Message uid: {} moved to folder {}".format(email_uid,winner))
+            score=sync_and_score(folder,source_hexdigest,dry_run,debug,quiet)
+            if score and score>winning_score:
+                winning_score=score
+                winning_folder=folder
+        # if there's a winning folder, move the message to it & add it to the db
+        if winning_folder:
+            if not dry_run:
+                if not quiet:
+                    print "* moving message to %s" % winning_folder
+                imap.select('inbox', readonly = False)
+                result=imap.uid('COPY',email_uid,'"'+ winning_folder +'"')
+                if result[0]=='OK':
+                    mov, data=imap.uid('STORE',email_uid,'+FLAGS','(\Deleted)')
+                    imap.expunge()
             else:
-                print ("Message uid: {} could not be moved to folder {}".format(email_uid,winner))
+                print "Dry run: would have moved %s to folder %s and stored that to the db" % (email_uid,winning_folder)
         else:
-            print ("Message uid: {} not moved".format(email_uid))
-        print ("-----")
-                    
+            considered.append(email_uid)
+            if not quiet:
+                print "- not moving message email_uid %s, email moved to considered list: %s" % (email_uid,considered)
 
 if __name__ == "__main__":
     # connect to sqlitedb, create table/s if necessary
     db_connect=sqlite3.connect(sqlite3_db)
     cursor=db_connect.cursor()
     cursor.execute('create table if not exists nilsimsa (id INTEGER PRIMARY KEY AUTOINCREMENT , uid INTEGER, folder TEXT, hexdigest TEXT)')
-    
+    cursor.execute('create index if not exists"main"."folder_index" on "nilsimsa" ("folder" ASC)')
+    # parse options
     parser = OptionParser(usage="python imap_nilsimsa.py or --help", description=__doc__)
-    parser.add_option("-r", "--rebuild", action="store_true", default=False, dest="rebuild", help="Rebuild (or build) the imap nilsimsa hex digests.  When used in combination with -l, will rebuild every -r loops")
-    parser.add_option("-s", "--autosort", action="store_true", dest="sort", default=False, help="Sort email in the inbox")
     parser.add_option("-d", "--debug", action="store_true", default=False, dest="debug", help="debug information")
+    parser.add_option("-q", "--quiet", action="store_true", default=False, dest="quiet", help="supress informational output")
     parser.add_option("-l", "--loop", action="store", type="float", default=0.0, dest="loop", help="loop -l seconds")
-    parser.add_option("--rebuild_every", action="store", type="float", default=10.0, dest="rebuild_every", help="rebuild every rebuild_every loop count")
+    parser.add_option("--dry-run", action="store_true", default=False, dest="dry_run", help="don't actually do anything, just tell us what you would do")
     (options, args)= parser.parse_args()
-
-    loop_count = 0.0
+    # do it
+    loop_count = 1
     while True:
-        print ("Processing: {}".format(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())))
-    
+        if not options.quiet:
+            print "\n-----\nProcessing: %s, cycle: %d" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),loop_count)
         # log in to the server
-        mail = imaplib.IMAP4_SSL( config['imap']['server'] )
-        mail.login( config['imap']['username'], config['imap']['password'] )
-        
-        if options.rebuild and not loop_count % options.rebuild_every:
-            for imap_folder in imap_folders:
-                print ("\nAnalysing " + imap_folder )
-                load_hexdigest( imap_folder, options.debug )
-        if options.sort:
-            autosort_inbox( imap_folders, options.debug )
-               
+        imap=imaplib.IMAP4_SSL( config['imap']['server'] )
+        imap.login(config['imap']['username'],config['imap']['password'] )
+        # sort inbox mail into imap folders
+        autosort_inbox(imap_folders,options.dry_run,options.debug,options.quiet)
+        # close connections & expunge etc.
+        imap.close()
+        imap.logout()
+        # loop if asked for, stop if not
         if options.loop > 0:
-            print ("Sleeping for {} seconds".format(options.loop))
+            if not options.quiet:
+                print "sleeping for %d seconds" % options.loop
             time.sleep(options.loop)
         else:
-            break
-            
-        db_connect.close()
-        mail.close()
-        mail.logout()
-            
+            break                        
         loop_count += 1
- 
+    # disconnect from squlite db
+    db_connect.close()

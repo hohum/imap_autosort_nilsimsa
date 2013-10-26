@@ -184,17 +184,17 @@ def compare_hexdigests( digest1, digest2 ):
     return 128 - bits
 
 def selftest( name=None, opt=None, value=None, parser=None ):
-    print ("running selftest...")
+    print "running selftest..."
     n1 = Nilsimsa()
     n1.update("abcdefgh")
     n2 = Nilsimsa(["abcd", "efgh"])
-    print ("abcdefgh:\t%s" % str(n1.hexdigest()==\
-        '14c8118000000000030800000004042004189020001308014088003280000078'))
-    print ("abcd efgh:\t%s" % str(n2.hexdigest()==\
-        '14c8118000000000030800000004042004189020001308014088003280000078'))
-    print ("digest:\t\t%s" % str(n1.digest() == n2.digest()))
+    print "abcdefgh:\t%s" % str(n1.hexdigest()==\
+        '14c8118000000000030800000004042004189020001308014088003280000078')
+    print "abcd efgh:\t%s" % str(n2.hexdigest()==\
+        '14c8118000000000030800000004042004189020001308014088003280000078')
+    print "digest:\t\t%s" % str(n1.digest() == n2.digest())
     n1.update("ijk")
-    print ("update(ijk):\t%s" % str(n1.hexdigest()==\
-        '14c811840010000c0328200108040630041890200217582d4098103280000078'))
-    print ("compare:\t%s" % str(n1.compare(n2.digest())==109))
-    print ("compare:\t%s" % str(n1.compare(n2.hexdigest(), ishex=True)==109))
+    print "update(ijk):\t%s" % str(n1.hexdigest()==\
+        '14c811840010000c0328200108040630041890200217582d4098103280000078')
+    print "compare:\t%s" % str(n1.compare(n2.digest())==109)
+    print "compare:\t%s" % str(n1.compare(n2.hexdigest(), ishex=True)==109)
