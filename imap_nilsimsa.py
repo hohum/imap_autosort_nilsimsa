@@ -1,4 +1,4 @@
-import imaplib, pickle, sys, email, time, configparser, sqlite3
+import imaplib, pickle, os, sys, email, time, configparser, sqlite3
 from nilsimsa import *
 from optparse import OptionParser
 
@@ -8,7 +8,7 @@ config.read('imap_autosort.conf')
 imap_folders=[x.strip() for x in config['imap']['folders'].split(',')]
 threshold=float(config['nilsimsa']['match_threshold'])
 sqlite3_db='.imap_nilsimsa.db'
-considered=[]
+lockfile='nilsimsa.lock'
 
 def status(num,max,message=''):
     # takes range argument so 10 elements would be 0..9
@@ -120,11 +120,11 @@ def autosort_inbox(folders,dry_run=False,debug=False,quiet=False):
     imap.select('inbox', readonly = False)
     result, data = imap.uid('search', None, "(UNSEEN)")
     email_uids=[int(x) for x in data[0].decode().split()]
-    # clean considered
-    considered=[x for x in considered if x in email_uids]
     for email_uid in email_uids:
         # don't consider unread email we weren't previously able to move
-        if email_uid in considered:
+        cursor.execute('select count(*) from considered where uid=?',[email_uid])
+        for row in cursor: count=row[0]
+        if count:
             if not quiet:
                 print "Already considered email_uid %s" % email_uid
             continue
@@ -170,16 +170,35 @@ def autosort_inbox(folders,dry_run=False,debug=False,quiet=False):
             else:
                 print "Dry run: would have moved %s to folder %s and stored that to the db" % (email_uid,winning_folder)
         else:
-            considered.append(email_uid)
+            cursor.execute('insert into considered (uid,considered_when) values (?,?)',[email_uid,int(time.time())])
+            db_connect.commit()
             if not quiet:
-                print "- not moving message email_uid %s, email moved to considered list: %s" % (email_uid,considered)
+                print "- not moving message email_uid, email moved to considered list for %s seconds" % config['general']['reconsider_after']
+
+def prune_considered():
+    now=int(time.time())
+    delete_older_than=now-int(config['general']['reconsider_after'])
+    cursor.execute('delete from considered where considered_when < ?',[delete_older_than])
+    db_connect.commit()
 
 if __name__ == "__main__":
+    # look for a lock file, if it exists, exit out quoting pid to stderr
+    if os.path.exists(lockfile):
+        f=open(lockfile)
+        pid=f.readline()
+        f.close()
+        print >> sys.stderr, 'Error: imap_nilsimsa lockfile exists for PID %s' % pid
+    else:
+        f=open(lockfile,'w')
+        f.write(str(os.getpid()))
+        f.close()
+        
     # connect to sqlitedb, create table/s if necessary
     db_connect=sqlite3.connect(sqlite3_db)
     cursor=db_connect.cursor()
     cursor.execute('create table if not exists nilsimsa (id INTEGER PRIMARY KEY AUTOINCREMENT , uid INTEGER, folder TEXT, hexdigest TEXT)')
     cursor.execute('create index if not exists"main"."folder_index" on "nilsimsa" ("folder" ASC)')
+    cursor.execute('create table if not exists considered (uid INTEGER, considered_when INTEGER)')
     # parse options
     parser = OptionParser(usage="python imap_nilsimsa.py or --help", description=__doc__)
     parser.add_option("-d", "--debug", action="store_true", default=False, dest="debug", help="debug information")
@@ -190,6 +209,7 @@ if __name__ == "__main__":
     # do it
     loop_count = 1
     while True:
+        prune_considered()
         if not options.quiet:
             print "\n-----\nProcessing: %s, cycle: %d" % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),loop_count)
         # log in to the server
@@ -210,3 +230,5 @@ if __name__ == "__main__":
         loop_count += 1
     # disconnect from squlite db
     db_connect.close()
+    # delete lockfile
+    os.remove(lockfile)

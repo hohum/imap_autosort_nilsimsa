@@ -8,3 +8,9 @@ folders=
 [nilsimsa]
 # for me match_threshold of 80 gives me excellent results but you can play with it
 match_threshold=80
+
+[general]
+# reconsider_after already considered isn't reconsidered on every run to save processing
+# power on large inboxes (thanks Tristan). Set to interval for inbox message reconsideration
+# in seconds
+reconsider_after=3600
