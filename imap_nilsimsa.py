@@ -187,7 +187,12 @@ if __name__ == "__main__":
         f=open(lockfile)
         pid=f.readline()
         f.close()
-        sys.exit('Error: imap_nilsimsa lockfile exists for PID %s' % pid)
+        try:
+            os.kill(pid, 0)
+        except:
+            os.remove(lockfile)
+            sys.exit('pid %s dead but lockfile exists; removing lockfile and exiting' % pid)
+        sys.exit('pid %s is running, exiting' % pid)
     else:
         f=open(lockfile,'w')
         f.write(str(os.getpid()))
