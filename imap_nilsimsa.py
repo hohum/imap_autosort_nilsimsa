@@ -1,4 +1,4 @@
-import imaplib, pickle, os, sys, email, time, configparser, sqlite3
+import imaplib, pickle, os, sys, email, time, configparser, sqlite3, re
 from nilsimsa import *
 from optparse import OptionParser
 
@@ -6,9 +6,29 @@ config = configparser.ConfigParser()
 config.read('imap_autosort.conf')
 
 imap_folders=[x.strip() for x in config['imap']['folders'].split(',')]
-threshold=float(config['nilsimsa']['match_threshold'])
 sqlite3_db='.imap_nilsimsa.db'
 lockfile='nilsimsa.lock'
+
+# get rid of patterns...
+no_MailScanner=re.compile('^X-.*-MailScanner.*?: .*$',re.M | re.I)
+no_amavis_1=re.compile('^X-Amavis.*?: .*$',re.M | re.I)
+no_amavis_2=re.compile('^X-Virus-Scanned: .*$',re.M | re.I)
+no_date=re.compile('^Date: .*$',re.M | re.I)
+no_message_id=re.compile('^Message-ID: .*$',re.M | re.I)
+no_spam_status=re.compile('^X-Spam-Status: .*$',re.M | re.I)
+no_dates_received=re.compile('^(Received: .*?); .*$',re.M | re.I)
+
+def remove_unwanted_in_header(header_string):
+    header_string=header_string.replace('\r','')
+    header_string=re.sub('\n[\t ]+',' ',header_string)
+    header_string=no_MailScanner.sub('',header_string)
+    header_string=no_amavis_1.sub('',header_string)
+    header_string=no_amavis_2.sub('',header_string)
+    header_string=no_date.sub('',header_string)
+    header_string=no_message_id.sub('',header_string)
+    header_string=no_spam_status.sub('',header_string)
+    header_string=no_dates_received.sub(r'\1',header_string)
+    return re.sub('\n{2,}','\n',header_string)
 
 def status(num,max,message=''):
     # takes range argument so 10 elements would be 0..9
@@ -56,9 +76,10 @@ def sync_and_score(folder,source_hexdigest,dry_run=False,debug=False,quiet=False
             # get the email header
             result, data = imap.uid('fetch', email_uid, '(BODY.PEEK[HEADER])')
             raw_header = data[0][1]
+            trimmed_header=remove_unwanted_in_header(raw_header)
             # compute the hexdigest & get the distance
             try:
-                nilsimsa=Nilsimsa(raw_header)
+                nilsimsa=Nilsimsa(trimmed_header)
             except:
                 # if we can't get the hex digest, there's no point continuing 
                 continue
@@ -78,6 +99,8 @@ def sync_and_score(folder,source_hexdigest,dry_run=False,debug=False,quiet=False
             del mail[email_uid]
         # calculate the nilsimsa distance
         distance=compare_hexdigests(source_hexdigest,target_hexdigest)
+        if debug:
+            print "calculated distance between %s and %s = %s" % (source_hexdigest,target_hexdigest,distance)
         # calculate the score
         if distance > threshold:
             # the score should always be out of 100
@@ -110,7 +133,7 @@ def sync_and_score(folder,source_hexdigest,dry_run=False,debug=False,quiet=False
     if scored_count:
         average=score/scored_count
     else:
-        average='n/a: no nothing over threshold'
+        average='n/a: no nothing over threshold %s' % threshold
     if not quiet:
         print "Score for folder %s=%s, average=%s" % (folder,score,average)
     return score
@@ -141,10 +164,11 @@ def autosort_inbox(folders,dry_run=False,debug=False,quiet=False):
             print "Error: email_uid: %s has no data" % email_uid
             continue
         msg=email.message_from_string( raw_header )
+        trimmed_header=remove_unwanted_in_header(raw_header)
         if not quiet:
             print "  Source: subject: %s" % msg['Subject']
         try:
-            nilsimsa=Nilsimsa(raw_header)
+            nilsimsa=Nilsimsa(trimmed_header)
         except:
             # if we can't get the hex digest, there's no point continuing 
             continue
@@ -211,6 +235,7 @@ if __name__ == "__main__":
     parser.add_option("-l", "--loop", action="store", type="float", default=0.0, dest="loop", help="loop -l seconds")
     parser.add_option("--dry-run", action="store_true", default=False, dest="dry_run", help="don't actually do anything, just tell us what you would do")
     (options, args)= parser.parse_args()
+    threshold=int(config['nilsimsa']['threshold'])
     # do it
     loop_count = 1
     while True:
