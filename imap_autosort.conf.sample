@@ -6,8 +6,7 @@ password=your.password
 folders=
 
 [nilsimsa]
-# for me match_threshold of 80 gives me excellent results but you can play with it
-match_threshold=80
+threshold=42
 
 [general]
 # reconsider_after already considered isn't reconsidered on every run to save processing

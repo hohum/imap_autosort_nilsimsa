@@ -1,3 +1,8 @@
+# written by Marc Lucke marc@marcsnet.com
+#  please respect my time and try to solve any problem yourself before contacting me
+#  if I can see you've made an effort, I'll be very happy to help
+version='1.0.0a'
+
 import imaplib, pickle, os, sys, email, time, configparser, sqlite3, re
 from nilsimsa import *
 from optparse import OptionParser
@@ -8,6 +13,7 @@ config.read('imap_autosort.conf')
 imap_folders=[x.strip() for x in config['imap']['folders'].split(',')]
 sqlite3_db='.imap_nilsimsa.db'
 lockfile='nilsimsa.lock'
+db_version='0.0' # default
 
 # get rid of patterns...
 no_MailScanner=re.compile('^X-.*-MailScanner.*?: .*$',re.M | re.I)
@@ -228,6 +234,16 @@ if __name__ == "__main__":
     cursor.execute('create table if not exists nilsimsa (id INTEGER PRIMARY KEY AUTOINCREMENT , uid INTEGER, folder TEXT, hexdigest TEXT)')
     cursor.execute('create index if not exists"main"."folder_index" on "nilsimsa" ("folder" ASC)')
     cursor.execute('create table if not exists considered (uid INTEGER, considered_when INTEGER)')
+    cursor.execute('create table if not exists version (version TEXT)')
+    cursor.execute('select version from version limit 1')
+    for row in cursor: # yuck
+        db_version=row[0]
+    if db_version != version:
+        print 'deleting database as the version is missing or incorrect.  It will take some time to rebuild the index, please be patient.'
+        cursor.execute('drop table nilsimsa')
+        cursor.execute('create table nilsimsa (id INTEGER PRIMARY KEY AUTOINCREMENT , uid INTEGER, folder TEXT, hexdigest TEXT)')
+        cursor.execute('delete from version')
+        cursor.execute('insert into version (version) values (?)',[version])
     # parse options
     parser = OptionParser(usage="python imap_nilsimsa.py or --help", description=__doc__)
     parser.add_option("-d", "--debug", action="store_true", default=False, dest="debug", help="debug information")
