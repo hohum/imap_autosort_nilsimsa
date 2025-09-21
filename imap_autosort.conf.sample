@@ -1,32 +1,41 @@
 [imap]
-server=your.server
-username=your.username
-password=your.password
-# folders: comma delimited list of imap folders to which inbox email should be sorted in to
-folders=inbox
-# todo: folder that autosort analyses
-todo=inbox/autosort
-# new: where to put emails autosort doesn't recognise
-new=inbox/autosort/new
+# your email account: set up as needed
+server=
+username=
+password=
+# set up as desired. The imap server needs to understand the format and the folders need to exist
+folders=inbox,Jobs,lists-general,news,shopping
+todo=inbox.autosort
+new=inbox.autosort.new
+
+[mysql]
+# currenly uses mysql - needs more work
+password=
 
 [archive]
-# the script can automatically archive your mail for you
-# specify which folder and after how many days email should
-# be archived
-folder=Archive
-after=90
-# justdelete: don't archive these
-justdelete=
-# trash: folder to move trash to
+# set to preferences
+folder=ZZZ
+after=180
+justdelete=System Messages,shopping,Misc,Jobs
 trash=Trash
 
 [nilsimsa]
-threshold=70
+# doco to come
+threshold=50
 min_score=10
-weight_headers=X-.*,List-.*
-weight_headers_by=3
+min_average=0.3
+min_over=3
+headers_skip=MIME-Version,Content-Type,Feedback-ID,Authentication-Results,Autocrypt,References,User-Agent
+xinclude=X-BeenThere,X-Mailer,X-Cron-Env,X-Auto-Response-Suppress,X-Facebook-Notify,X-.*Complaints.*,X-.*Abuse.*,X-sgxh1,X-MC-User,X-Original-Sender,X-MEETUP-RECIP-ID.X-MEETUP-TRACK,X-LinkedIn-Template,X-EMarSys-Environment,X-Mailgun-Tag,X-Mailgun-Sid,X-Mailgun-Sending-Ip,X-Forwarded-For,X-Forwarded-To
+weight_headers=X-LinkedIn-Class,List-Id,X-BeenThere,From
+weight_headers_by=2
 
 [general]
+# doco to come
 maintenance=0
 logfile=imap_autosort.log
 reconsider_after=3600
+
+[openai]
+# as at writing an api key is needed
+api_key=
