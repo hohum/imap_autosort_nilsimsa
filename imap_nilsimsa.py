@@ -25,6 +25,7 @@ import time
 import statistics
 from typing import Dict, List, Tuple
 from openai import OpenAI
+from db import DatabaseHelper
 import pprint
 
 import mysql.connector
@@ -40,74 +41,6 @@ def setup_logger(name):
         logger.addHandler(file_handler)
     logger.setLevel(logging.INFO)
     return logger
-
-class DatabaseHelper:
-    def __init__(self, mysql_pass, version, logger):
-        self.conn = mysql.connector.connect(
-            host="localhost", user="imap_nilsimsa", passwd=mysql_pass, db="imap_nilsimsa", autocommit=True
-        )
-        self.cursor = self.conn.cursor(buffered=True)
-        self.logger = logger
-        self.version = version
-        self._init_schema()
-
-    # Convenience wrappers so callers can either:
-    #   self.db.execute("SELECT ...", params); rows = self.db.fetchall()
-    # or:
-    #   rows = self.db.fetchall("SELECT ...", params)
-    def fetchall(self, *args, **kwargs):
-        if args or kwargs:
-            # args/kwargs contain a query → run it, then fetch
-            self.cursor.execute(*args, **kwargs)
-        return self.cursor.fetchall()
-
-    def execute(self, *args, **kwargs):
-        return self.cursor.execute(*args, **kwargs)
-
-
-    def _init_schema(self):
-        """Connect to MySQL and ensure schema/version – behavior unchanged."""
-        try:
-            # tables
-            self.cursor.execute(
-                'CREATE TABLE IF NOT EXISTS nilsimsa ('
-                'id INTEGER PRIMARY KEY AUTO_INCREMENT, '
-                'added TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, '
-                'uid INTEGER, folder TEXT, hexdigest TEXT, md5sum TEXT, trimmed_header TEXT)'
-            )
-            self.cursor.execute('CREATE TABLE IF NOT EXISTS considered (uid INTEGER, considered_when INTEGER)')
-            self.cursor.execute('CREATE TABLE IF NOT EXISTS version (version TEXT)')
-            # version
-            self.cursor.execute('SELECT version FROM version LIMIT 1')
-            row = self.cursor.fetchone()
-            self.db_version = row[0] if row else None
-            if self.db_version != self.version:
-                print('Database version mismatch or missing. Rebuilding the nilsimsa table...')
-                self.cursor.execute('DROP TABLE IF EXISTS nilsimsa')
-                self.cursor.execute(
-                    'CREATE TABLE nilsimsa ('
-                    'id INTEGER PRIMARY KEY AUTO_INCREMENT, '
-                    'added TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, '
-                    'uid INTEGER, folder TEXT, hexdigest TEXT, md5sum TEXT, trimmed_header TEXT)'
-                )
-                self.cursor.execute('DELETE FROM version')
-                self.cursor.execute("INSERT INTO version (version) VALUES (%s)", (self.version,))
-        except mysql.connector.Error as e:
-            self.logger.error("Database connection error: %s", e)
-            sys.exit("Database connection failed.")
-
-        def fetchall(self, *args, **kwargs):
-            if args or kwargs:
-                self.cursor.execute(*args, **kwargs)
-            return self.cursor.fetchall()
-
-    def execute(self, *args, **kwargs):
-        self.cursor.execute(*args, **kwargs)
-        self.conn.commit()
-
-    def close(self):
-        self.cursor.close()
-        self.conn.close()
 
 class IMAPHelper:
     def __init__(self, config):
