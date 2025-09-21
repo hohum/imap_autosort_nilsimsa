@@ -31,6 +31,152 @@ import mysql.connector
 from nilsimsa import Nilsimsa, compare_hexdigests
 import select
 
+def setup_logger(name):
+    logger = logging.getLogger(name)
+    log_filename = time.strftime("%Y%m%d", time.localtime()) + ".log"
+    if not logger.handlers:
+        file_handler = logging.FileHandler(log_filename)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+        logger.addHandler(file_handler)
+    logger.setLevel(logging.INFO)
+    return logger
+
+class DatabaseHelper:
+    def __init__(self, mysql_pass, version, logger):
+        self.conn = mysql.connector.connect(
+            host="localhost", user="imap_nilsimsa", passwd=mysql_pass, db="imap_nilsimsa", autocommit=True
+        )
+        self.cursor = self.conn.cursor(buffered=True)
+        self.logger = logger
+        self.version = version
+        self._init_schema()
+
+    # Convenience wrappers so callers can either:
+    #   self.db.execute("SELECT ...", params); rows = self.db.fetchall()
+    # or:
+    #   rows = self.db.fetchall("SELECT ...", params)
+    def fetchall(self, *args, **kwargs):
+        if args or kwargs:
+            # args/kwargs contain a query → run it, then fetch
+            self.cursor.execute(*args, **kwargs)
+        return self.cursor.fetchall()
+
+    def execute(self, *args, **kwargs):
+        return self.cursor.execute(*args, **kwargs)
+
+
+    def _init_schema(self):
+        """Connect to MySQL and ensure schema/version – behavior unchanged."""
+        try:
+            # tables
+            self.cursor.execute(
+                'CREATE TABLE IF NOT EXISTS nilsimsa ('
+                'id INTEGER PRIMARY KEY AUTO_INCREMENT, '
+                'added TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, '
+                'uid INTEGER, folder TEXT, hexdigest TEXT, md5sum TEXT, trimmed_header TEXT)'
+            )
+            self.cursor.execute('CREATE TABLE IF NOT EXISTS considered (uid INTEGER, considered_when INTEGER)')
+            self.cursor.execute('CREATE TABLE IF NOT EXISTS version (version TEXT)')
+            # version
+            self.cursor.execute('SELECT version FROM version LIMIT 1')
+            row = self.cursor.fetchone()
+            self.db_version = row[0] if row else None
+            if self.db_version != self.version:
+                print('Database version mismatch or missing. Rebuilding the nilsimsa table...')
+                self.cursor.execute('DROP TABLE IF EXISTS nilsimsa')
+                self.cursor.execute(
+                    'CREATE TABLE nilsimsa ('
+                    'id INTEGER PRIMARY KEY AUTO_INCREMENT, '
+                    'added TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, '
+                    'uid INTEGER, folder TEXT, hexdigest TEXT, md5sum TEXT, trimmed_header TEXT)'
+                )
+                self.cursor.execute('DELETE FROM version')
+                self.cursor.execute("INSERT INTO version (version) VALUES (%s)", (self.version,))
+        except mysql.connector.Error as e:
+            self.logger.error("Database connection error: %s", e)
+            sys.exit("Database connection failed.")
+
+        def fetchall(self, *args, **kwargs):
+            if args or kwargs:
+                self.cursor.execute(*args, **kwargs)
+            return self.cursor.fetchall()
+
+    def execute(self, *args, **kwargs):
+        self.cursor.execute(*args, **kwargs)
+        self.conn.commit()
+
+    def close(self):
+        self.cursor.close()
+        self.conn.close()
+
+class IMAPHelper:
+    def __init__(self, config):
+        self.server = config.get('imap', 'server')
+        self.username = config.get('imap', 'username')
+        self.password = config.get('imap', 'password')
+        self.imap = None
+
+    def connect(self):
+        self.imap = imaplib.IMAP4_SSL(self.server)
+        self.imap.login(self.username, self.password)
+        return self.imap
+
+    def close(self):
+        if self.imap:
+            try: self.imap.close()
+            except Exception: pass
+            try: self.imap.logout()
+            except Exception: pass
+
+class HeaderNormalizer:
+    @staticmethod
+    def normalize(mail_txt, exclude_headers, headers_skip_re, chomp_header, headerIsX, xinclude, dkim_just_d, 
+                    exclude_received_from_localhost, weight_headers_re, weight_headers_by):
+        """Normalize headers to a stable, content-centric text.
+
+        We remove non-signal noise that varies across MTAs: weekdays/dates/ids,
+        amavis/mailscanner artifacts, local Received lines, and collapse folded
+        whitespace. DKIM is reduced to its domain (d=...), and we suppress most
+        X- headers except if explicitly listed in xinclude.
+        """
+        mail_txt = re.sub(r'(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat).*?([;\n])', r'\1', mail_txt)
+        result = ''
+        msg = email.message_from_string(mail_txt)
+        for header in sorted(set(msg.keys())):
+            if exclude_headers.search(header) or headers_skip_re.search(header):
+                continue
+            for this_header_content in msg.get_all(header):
+                # Unfold header lines and preserve bytes via backslash escapes
+                this_header_content = chomp_header.sub(' ', this_header_content.encode('ascii', 'backslashreplace').decode())
+                this_header_content += "\n"
+                # Drop most X- headers unless explicitly kept
+                if headerIsX.search(header) and header not in xinclude:
+                    continue
+                # Received/X-Received cleanup (strip ids, weekdays, month names, times, tzs, and noisy by-clauses)
+                if header in ['Received', 'X-Received']:
+                    if re.search(r'port 10024', this_header_content):  # amavis noise
+                        continue
+                    if header == 'Received' and exclude_received_from_localhost.match(this_header_content):
+                        continue
+                    this_header_content = re.sub(r' id \S+', '', this_header_content)
+                    this_header_content = re.sub(r' (Sun|Mon|Tue|Wed|Thu|Fri|Sat),', '', this_header_content)
+                    this_header_content = re.sub(r' (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', '', this_header_content)
+                    this_header_content = re.sub(r' \d{4}-\d{2}-\d{2}', '', this_header_content)
+                    this_header_content = re.sub(r' \d{2}:\d{2}:\d{2}(\.\d+)*', '', this_header_content)
+                    this_header_content = re.sub(r' ( [A-Z]{3,4} )*m=\+\d+\.\d+', '', this_header_content)
+                    this_header_content = re.sub(r' \+\d{4}( (\([A-Z]{3,4}\)))*', '', this_header_content)
+                    this_header_content = re.sub(r' \(.*?\) by ', ' by ', this_header_content)
+                    add = header + ': ' + this_header_content
+                elif header == 'DKIM-Signature':
+                    add = header + ': ' + dkim_just_d.sub(r'\1', this_header_content)
+                else:
+                    add = header + ': ' + this_header_content
+                # Header weighting: exact same effect as original (string repetition)
+                if weight_headers_re.search(header):
+                    add += add * weight_headers_by
+                result += add
+        return result
+
 class IMAPAutoSorter:
     """Sort emails into folders by Nilsimsa similarity of headers.
 
@@ -104,19 +250,11 @@ class IMAPAutoSorter:
         self.headerIsX = re.compile(r"^x-", re.I)
 
         # Logging — daily filename like original, avoid duplicate handlers
-        self.logger = logging.getLogger("imap_nilsimsa")
-        log_filename = time.strftime("%Y%m%d", time.localtime()) + ".log"
-        if not self.logger.handlers:
-            file_handler = logging.FileHandler(log_filename)
-            file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
-            self.logger.addHandler(file_handler)
-        self.logger.setLevel(logging.INFO)
+        self.logger = setup_logger("imap_nilsimsa")
 
         # DB
-        self.db_conn = None
-        self.db_cursor = None
-        self.db_version = None
-        self._db_connect_and_init()
+        self.db = DatabaseHelper(self.mysql_pass, self.version, self.logger)
+        self.imap_helper = IMAPHelper(self.config)
 
     # ------------------------------ small helpers ------------------------------
     
@@ -169,42 +307,19 @@ class IMAPAutoSorter:
                 sys.exit(0)
             raise
 
-    def _db_connect_and_init(self) -> None:
-        """Connect to MySQL and ensure schema/version – behavior unchanged."""
-        try:
-            self.db_conn = mysql.connector.connect(
-                host="localhost", user="imap_nilsimsa", passwd=self.mysql_pass, db="imap_nilsimsa", autocommit=True
-            )
-            self.db_cursor = self.db_conn.cursor(buffered=True)
-            # tables
-            self.db_cursor.execute(
-                'CREATE TABLE IF NOT EXISTS nilsimsa ('
-                'id INTEGER PRIMARY KEY AUTO_INCREMENT, '
-                'added TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, '
-                'uid INTEGER, folder TEXT, hexdigest TEXT, md5sum TEXT, trimmed_header TEXT)'
-            )
-            self.db_cursor.execute('CREATE TABLE IF NOT EXISTS considered (uid INTEGER, considered_when INTEGER)')
-            self.db_cursor.execute('CREATE TABLE IF NOT EXISTS version (version TEXT)')
-            # version
-            self.db_cursor.execute('SELECT version FROM version LIMIT 1')
-            row = self.db_cursor.fetchone()
-            self.db_version = row[0] if row else None
-            if self.db_version != self.version:
-                print('Database version mismatch or missing. Rebuilding the nilsimsa table...')
-                self.db_cursor.execute('DROP TABLE IF EXISTS nilsimsa')
-                self.db_cursor.execute(
-                    'CREATE TABLE nilsimsa ('
-                    'id INTEGER PRIMARY KEY AUTO_INCREMENT, '
-                    'added TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, '
-                    'uid INTEGER, folder TEXT, hexdigest TEXT, md5sum TEXT, trimmed_header TEXT)'
-                )
-                self.db_cursor.execute('DELETE FROM version')
-                self.db_cursor.execute("INSERT INTO version (version) VALUES (%s)", (self.version,))
-        except mysql.connector.Error as e:
-            self.logger.error("Database connection error: %s", e)
-            sys.exit("Database connection failed.")
-
     # ------------------------------ status ------------------------------
+    @staticmethod
+    def status(current: int, total: int, message: str = '') -> None:
+        """One-line progress bar identical in effect to original."""
+        if total <= 1:
+            return
+        percent = int(100 * current / (total - 1) + 0.5)
+        num_equals = int(percent / 2)
+        sys.stdout.write("%s [%-50s] %3d%% %d/%d\r" % (message, '=' * num_equals, percent, current + 1, total))
+        if current == (total - 1):
+            print("")
+        sys.stdout.flush()
+
     def _classify_email(self, from_addr: str, subject: str):
         prompt = f"""
 From: {from_addr}
@@ -224,8 +339,6 @@ Guidance:
 - detect distinctive signals — including subtle role phrases — and adaptively generalize them into brand-agnostic concepts; capture oddities that differentiate the message; avoid proper nouns/department names and fixed keyword lists; do not prioritize any field (e.g., “photo desk” ⇒ “photo”).
 - Some emails are internal notifications from my own systems (e.g. Macrodroid, fail2ban).
 """
-        if not self.client:
-            return '[{"cta":"Notice LLM not configured"},{"label":["Unclassified:1.00"]}]'
         try:
             response = self.client.chat.completions.create(
                 model="gpt-5-mini",
@@ -260,50 +373,9 @@ Guidance:
 
     # ------------------------------ header normalization ------------------------------
     def return_header(self, mail_txt: str) -> str:
-        """Normalize headers to a stable, content-centric text.
-
-        We remove non-signal noise that varies across MTAs: weekdays/dates/ids,
-        amavis/mailscanner artifacts, local Received lines, and collapse folded
-        whitespace. DKIM is reduced to its domain (d=...), and we suppress most
-        X- headers except if explicitly listed in xinclude.
-        """
-        mail_txt = re.sub(r'(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat).*?([;\n])', r'\1', mail_txt)
-        result = ''
-        msg = email.message_from_string(mail_txt)
-        for header in sorted(set(msg.keys())):
-            if self.exclude_headers.search(header) or self.headers_skip_re.search(header):
-                continue
-            for this_header_content in msg.get_all(header):
-                # Unfold header lines and preserve bytes via backslash escapes
-                this_header_content = self.chomp_header.sub(' ', this_header_content.encode('ascii', 'backslashreplace').decode())
-                this_header_content += "\n"
-                # Drop most X- headers unless explicitly kept
-                if self.headerIsX.search(header) and header not in self.xinclude:
-                    continue
-                # Received/X-Received cleanup (strip ids, weekdays, month names, times, tzs, and noisy by-clauses)
-                if header in ['Received', 'X-Received']:
-                    if re.search(r'port 10024', this_header_content):  # amavis noise
-                        continue
-                    if header == 'Received' and self.exclude_received_from_localhost.match(this_header_content):
-                        continue
-                    this_header_content = re.sub(r' id \S+', '', this_header_content)
-                    this_header_content = re.sub(r' (Sun|Mon|Tue|Wed|Thu|Fri|Sat),', '', this_header_content)
-                    this_header_content = re.sub(r' (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', '', this_header_content)
-                    this_header_content = re.sub(r' \d{4}-\d{2}-\d{2}', '', this_header_content)
-                    this_header_content = re.sub(r' \d{2}:\d{2}:\d{2}(\.\d+)*', '', this_header_content)
-                    this_header_content = re.sub(r' ( [A-Z]{3,4} )*m=\+\d+\.\d+', '', this_header_content)
-                    this_header_content = re.sub(r' \+\d{4}( (\([A-Z]{3,4}\)))*', '', this_header_content)
-                    this_header_content = re.sub(r' \(.*?\) by ', ' by ', this_header_content)
-                    add = header + ': ' + this_header_content
-                elif header == 'DKIM-Signature':
-                    add = header + ': ' + self.dkim_just_d.sub(r'\1', this_header_content)
-                else:
-                    add = header + ': ' + this_header_content
-                # Header weighting: exact same effect as original (string repetition)
-                if self.weight_headers_re.search(header):
-                    add += add * self.weight_headers_by
-                result += add
-        return result
+        return HeaderNormalizer.normalize(mail_txt, self.exclude_headers, self.headers_skip_re, self.chomp_header, self.headerIsX,
+                                            self.xinclude, self.dkim_just_d, self.exclude_received_from_localhost, self.weight_headers_re, 
+                                            self.weight_headers_by)
 
     # ------------------------------ core: sync & distance ------------------------------
     def sync_and_distance(self, imap: imaplib.IMAP4_SSL, folder: str, source_hexdigest: str,
@@ -321,8 +393,8 @@ Guidance:
 
         # Load cached rows for this folder
         mail_db: Dict[str, str] = {}
-        self.db_cursor.execute("SELECT uid, hexdigest FROM nilsimsa WHERE folder = %s", (folder,))
-        for uid, hx in self.db_cursor.fetchall():
+        self.db.execute("SELECT uid, hexdigest FROM nilsimsa WHERE folder = %s", (folder,))
+        for uid, hx in self.db.fetchall():
             mail_db[str(uid)] = str(hx)
 
         # Live IMAP UIDs (read-write select so expunged are gone)
@@ -344,8 +416,8 @@ Guidance:
                 trimmed_header = self.return_header(raw_header)
                 md5sum = hashlib.md5(trimmed_header.encode('utf-8')).hexdigest()
                 # Look up any rows with this md5 (same normalized header)
-                self.db_cursor.execute("SELECT id, uid, folder, categories, hexdigest FROM nilsimsa WHERE md5sum = %s", (md5sum,))
-                md5_rows = self.db_cursor.fetchall()
+                self.db.execute("SELECT id, uid, folder, categories, hexdigest FROM nilsimsa WHERE md5sum = %s", (md5sum,))
+                md5_rows = self.db.fetchall()
                 if not md5_rows:
                     # No md5sum entry → treat as new. Classify, compute hexdigest over categories+trimmed_header, insert full row.
                     msg = email.message_from_string(raw_header)
@@ -360,7 +432,7 @@ Guidance:
                         imap.uid('MOVE', email_uid, 'INBOX.autosort.problem')
                         continue
                     if not dry_run:
-                        self.db_cursor.execute(
+                        self.db.execute(
                             "INSERT INTO nilsimsa (uid, folder, hexdigest, md5sum, trimmed_header, categories) VALUES (%s, %s, %s, %s, %s, %s)",
                             (email_uid, folder, target_hexdigest, md5sum, trimmed_header, cats),
                         )
@@ -371,11 +443,10 @@ Guidance:
                         # Update DB to reflect IMAP state (uid, folder, moved_from)
                         if not dry_run:
                             try:
-                                self.db_cursor.execute(
+                                self.db.execute(
                                     "UPDATE nilsimsa SET uid=%s, folder=%s, moved_from=%s WHERE id=%s",
                                     (email_uid, folder, prev_folder or '', prev_id),
                                 )
-                                self.db_conn.commit()
                             except Exception as e:
                                 if self.logger: self.logger.error("Move-update failed: %s", e)
                         # Choose categories: reuse if present, else classify once
@@ -393,11 +464,10 @@ Guidance:
                                 continue
                             if not dry_run:
                                 try:
-                                    self.db_cursor.execute(
+                                    self.db.execute(
                                         "UPDATE nilsimsa SET categories=%s, hexdigest=%s WHERE id=%s",
                                         (cats, target_hexdigest, prev_id),
                                     )
-                                    self.db_conn.commit()
                                 except Exception as e:
                                     if self.logger: self.logger.error("Post-move categories update failed: %s", e)
                         else:
@@ -426,7 +496,7 @@ Guidance:
                             self.logger.error(trimmed_header)
                             continue
                         if not dry_run:
-                            self.db_cursor.execute(
+                            self.db.execute(
                                 "INSERT INTO nilsimsa (uid, folder, hexdigest, md5sum, trimmed_header, categories) VALUES (%s, %s, %s, %s, %s, %s)",
                                 (email_uid, folder, target_hexdigest, md5sum, trimmed_header, cats),
                             )
@@ -455,7 +525,7 @@ Guidance:
             if not quiet:
                 self.status(0, len(mail_db), 'Deleting moved messages ')
             if not dry_run:
-                self.db_cursor.execute("DELETE FROM nilsimsa WHERE uid = %s AND folder = %s", (email_uid, folder))
+                self.db.execute("DELETE FROM nilsimsa WHERE uid = %s AND folder = %s", (email_uid, folder))
             else:
                 print("Dry run: would have deleted DB entry for UID: %s, folder: %s" % (email_uid, folder))
 
@@ -607,7 +677,7 @@ Guidance:
                 T = base_T
                 winning_folder, winning_score = self.new_folder, 0.0
                 while True:
-                    # Score all folders at shared threshold T
+                    # Score all folders at a shared threshold T
                     stats = {}  # f -> (score, avg)
                     sum_av = 0.0
                     for f, d in dist_cache.items():
@@ -662,11 +732,10 @@ Guidance:
                         # --- DB upsert to reflect move (md5 on trimmed_header; hexdigest on categories+trimmed_header) ---
                         md5sum = hashlib.md5(trimmed_header.encode('utf-8')).hexdigest()
                         message_id = (msg.get('Message-ID','') or '').strip()                    
-                        self.db_cursor.execute(
+                        self.db.execute(
                             "INSERT INTO nilsimsa (uid, folder, hexdigest, md5sum, trimmed_header, categories, moved_from, message_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                             (dst_uid, winning_folder, source_hexdigest, md5sum, trimmed_header, cats, self.todo_folder, message_id)
                         )
-                        self.db_conn.commit()
                         self.logger.info("Moved email %s to %s (dst UID: %s)", email_uid, winning_folder, dst_uid)
                     else:
                         self.logger.error("MOVE failed for %s -> %s", email_uid, winning_folder)
@@ -714,20 +783,10 @@ Guidance:
         """Delete old rows from 'considered' to avoid reprocessing."""
         now = int(time.time())
         delete_older_than = now - self.reconsider_after - random.randint(0, self.reconsider_after)
-        self.db_cursor.execute("DELETE FROM considered WHERE considered_when < %s", (delete_older_than,))
+        self.db.execute("DELETE FROM considered WHERE considered_when < %s", (delete_older_than,))
 
     def _imap_connect(self):
-        """Centralized IMAP connection logic."""
-        try:
-            imap_server = self.config.get('imap', 'server')
-            imap_username = self.config.get('imap', 'username')
-            imap_password = self.config.get('imap', 'password')
-            imap = imaplib.IMAP4_SSL(imap_server)
-            imap.login(imap_username, imap_password)
-            return imap
-        except Exception as e:
-            self.logger.error("IMAP connection error: %s", e)
-            raise
+        return self.imap_helper.connect()
 
     def _process_core(self, imap, dry_run=False, debug=False, quiet=False):
         """Core logic for archiving and sorting mail, shared by process/process_with_idle."""
@@ -748,14 +807,7 @@ Guidance:
         try:
             self._process_core(imap, dry_run, debug, quiet)
         finally:
-            try:
-                imap.close()
-            except Exception:
-                pass
-            try:
-                imap.logout()
-            except Exception:
-                pass
+            self.imap_helper.close()
             self.logger.info(f"## ----- End Script run")
 
     def process_with_idle(self, dry_run=False, debug=False, quiet=False, loop=False, idle_timeout=900, poll_interval=60):
@@ -769,14 +821,7 @@ Guidance:
                 if not loop:
                     break
         finally:
-            try:
-                imap.close()
-            except Exception:
-                pass
-            try:
-                imap.logout()
-            except Exception:
-                pass
+            self.imap_helper.close()
             self.logger.info(f"## ----- End Script run")
 
     def supports_idle(self, imap: imaplib.IMAP4_SSL) -> bool:
