@@ -29,7 +29,7 @@ import pprint
 
 import mysql.connector
 from nilsimsa import Nilsimsa, compare_hexdigests
-
+import select
 
 class IMAPAutoSorter:
     """Sort emails into folders by Nilsimsa similarity of headers.
@@ -716,23 +716,22 @@ Guidance:
         delete_older_than = now - self.reconsider_after - random.randint(0, self.reconsider_after)
         self.db_cursor.execute("DELETE FROM considered WHERE considered_when < %s", (delete_older_than,))
 
-    def process(self, dry_run: bool = False, debug: bool = False, quiet: bool = False) -> None:
-        self.logger.info(f"## ----- Begin Script run")
-        """Top-level: prune, archive, then sort."""
-        self.prune_considered()
-        print("\n-----\nProcessing at %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-
-        # IMAP login — **use the original keys**: server/username/password
+    def _imap_connect(self):
+        """Centralized IMAP connection logic."""
         try:
             imap_server = self.config.get('imap', 'server')
             imap_username = self.config.get('imap', 'username')
             imap_password = self.config.get('imap', 'password')
             imap = imaplib.IMAP4_SSL(imap_server)
             imap.login(imap_username, imap_password)
+            return imap
         except Exception as e:
             self.logger.error("IMAP connection error: %s", e)
             raise
 
+    def _process_core(self, imap, dry_run=False, debug=False, quiet=False):
+        """Core logic for archiving and sorting mail, shared by process/process_with_idle."""
+        self.prune_considered()
         print("Archiving messages")
         try:
             self.archive_emails(imap, dry_run)
@@ -742,20 +741,100 @@ Guidance:
         print("Sorting mail")
         self.autosort_inbox(imap, dry_run, debug, quiet)
 
-        imap.close()
-        imap.logout()
-        self.logger.info(f"## ----- End Script run")
-
-    def close(self) -> None:
-        """Close DB and release flock."""
-        if self.db_conn:
-            self.db_conn.close()
-        if self.lock_fd:
+    def process(self, dry_run: bool = False, debug: bool = False, quiet: bool = False) -> None:
+        self.logger.info(f"## ----- Begin Script run")
+        print("\n-----\nProcessing at %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        imap = self._imap_connect()
+        try:
+            self._process_core(imap, dry_run, debug, quiet)
+        finally:
             try:
-                self.lock_fd.close()
+                imap.close()
             except Exception:
                 pass
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            self.logger.info(f"## ----- End Script run")
 
+    def process_with_idle(self, dry_run=False, debug=False, quiet=False, loop=False, idle_timeout=900, poll_interval=60):
+        self.logger.info(f"## ----- Begin Script run (IDLE/poll mode)")
+        print("\n-----\nProcessing at %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        imap = self._imap_connect()
+        try:
+            while True:
+                self._process_core(imap, dry_run, debug, quiet)
+                self.idle_or_poll(imap, self.todo_folder, poll_interval=poll_interval, idle_timeout=idle_timeout)
+                if not loop:
+                    break
+        finally:
+            try:
+                imap.close()
+            except Exception:
+                pass
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            self.logger.info(f"## ----- End Script run")
+
+    def supports_idle(self, imap: imaplib.IMAP4_SSL) -> bool:
+        """Check if the IMAP server supports the IDLE extension."""
+        try:
+            typ, data = imap.capability()
+            if typ == "OK" and data:
+                caps = b" ".join(data).upper()
+                return b"IDLE" in caps
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.warning("Error checking IMAP capabilities: %s", e)
+        return False
+
+    def idle_wait(self, imap: imaplib.IMAP4_SSL, folder: str, timeout: int = 900) -> bool:
+        """
+        Enter IMAP IDLE mode and wait for a new message or timeout.
+        Returns True if new mail is detected, False if timeout.
+        """
+        try:
+            imap.select(folder, readonly=False)
+            if not hasattr(imap, 'sock'):
+                return False
+            imap.send(b'IDLE\r\n')
+            r, _, _ = select.select([imap.sock], [], [], timeout)
+            if r:
+                resp = imap.sock.recv(4096)
+                imap.send(b'DONE\r\n')
+                imap._get_response()
+                return True
+            else:
+                imap.send(b'DONE\r\n')
+                imap._get_response()
+                return False
+        except Exception as e:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.warning("IMAP IDLE failed: %s", e)
+            return False
+
+    def idle_or_poll(self, imap: imaplib.IMAP4_SSL, folder: str, poll_interval: int = 60, idle_timeout: int = 900) -> None:
+        """
+        Wait for new mail using IDLE if supported, else poll every poll_interval seconds.
+        Only returns when new mail is detected.
+        """
+        if self.supports_idle(imap):
+            while True:
+                if self.todo_count(imap) > 0:
+                    break
+                self.logger.info("Waiting for new mail using IMAP IDLE...")
+                if self.idle_wait(imap, folder, timeout=idle_timeout):
+                    self.logger.info("IMAP IDLE: new mail detected.")
+                    break
+        else:
+            while True:
+                if self.todo_count(imap) > 0:
+                    break
+                self.logger.info("Waiting for new mail (polling every %ds)...", poll_interval)
+                time.sleep(poll_interval)
 
 # ------------------------------ CLI ------------------------------
 
@@ -766,6 +845,7 @@ def main() -> None:
     parser.add_argument("-l", "--loop", type=float, default=0.0, help="Loop delay in seconds (if > 0, script repeats)")
     parser.add_argument("--dry-run", action="store_true", help="Perform a dry run without moving emails")
     parser.add_argument("--config", type=str, default="imap_autosort.conf", help="Path to configuration file")
+    parser.add_argument("--daemon", action="store_true", help="Run as a background daemon (requires python-daemon)")
     args = parser.parse_args()
 
     # Optionally change directory to the script location
@@ -777,17 +857,24 @@ def main() -> None:
     if sorter.maintenance:
         sys.exit('Under Maintenance')
 
-    try:
-        while True:
-            sorter.process(dry_run=args.dry_run, debug=args.debug, quiet=args.quiet)
-            if args.loop > 0:
-                print("Sleeping for %d seconds" % args.loop)
-                time.sleep(args.loop)
-            else:
-                break
-    finally:
-        sorter.close()
-
+    # Use IDLE/polling only if daemon or loop mode
+    if args.daemon:
+        try:
+            import daemon
+        except ImportError:
+            sys.exit("python-daemon is required for --daemon mode. Install with: pip install python-daemon")
+        with daemon.DaemonContext():
+            sorter.process_with_idle(
+                dry_run=args.dry_run, debug=args.debug, quiet=args.quiet,
+                loop=True, idle_timeout=int(args.loop) if args.loop > 0 else 900, poll_interval=60
+            )
+    elif args.loop and args.loop > 0:
+        sorter.process_with_idle(
+            dry_run=args.dry_run, debug=args.debug, quiet=args.quiet,
+            loop=True, idle_timeout=int(args.loop), poll_interval=60
+        )
+    else:
+        sorter.process(dry_run=args.dry_run, debug=args.debug, quiet=args.quiet)
 
 if __name__ == "__main__":
     main()
