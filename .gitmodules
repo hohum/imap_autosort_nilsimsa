@@ -1,3 +1,3 @@
 [submodule "mysql-connector-python"]
 	path = mysql-connector-python
-	url = https://github.com/mysql/mysql-connector-python.git
+	url = git@github.com:mysql/mysql-connector-python.git
