@@ -1,7 +1,12 @@
 .*
 *.log
+*.zip
 log_archive.tar.gz
 imap_autosort.conf
+imap_autosort.ini
 report.pl
 nilsimsa/__init__.pyc
 stats/*
+backup/*
+etc/*
+var/*
