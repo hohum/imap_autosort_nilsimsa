@@ -1,5 +1,7 @@
 .*
+__pycache__
 *.log
+*.pl
 *.zip
 log_archive.tar.gz
 imap_autosort.conf
