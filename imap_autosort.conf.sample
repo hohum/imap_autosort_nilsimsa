@@ -37,5 +37,5 @@ logfile=imap_autosort.log
 reconsider_after=3600
 
 [openai]
-# as at writing an api key is needed
+# add if you want to add a signal for nilsimsa
 api_key=

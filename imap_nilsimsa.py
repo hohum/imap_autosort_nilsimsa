@@ -60,7 +60,17 @@ class IMAPAutoSorter:
         self.imap_folders = self._get_list("imap", "folders")
         
         # openai api key
-        self.client = OpenAI(api_key=self.config.get("openai","api_key"))
+        api_key = self.config.get("openai", "api_key", fallback=None)
+        self.client = None
+        if api_key:
+            api_key = api_key.strip()
+            if api_key:
+                try:
+                    self.client = OpenAI(api_key=api_key)
+                except Exception as e:
+                    self.client = None
+                    if hasattr(self, "logger") and self.logger:
+                        self.logger.error("OpenAI client init failed: %s", e)
 
         # Nilsimsa thresholds & knobs
         self.threshold = self.config.getint("nilsimsa", "threshold", fallback=50)
@@ -214,6 +224,8 @@ Guidance:
 - detect distinctive signals — including subtle role phrases — and adaptively generalize them into brand-agnostic concepts; capture oddities that differentiate the message; avoid proper nouns/department names and fixed keyword lists; do not prioritize any field (e.g., “photo desk” ⇒ “photo”).
 - Some emails are internal notifications from my own systems (e.g. Macrodroid, fail2ban).
 """
+        if not self.client:
+            return '[{"cta":"Notice LLM not configured"},{"label":["Unclassified:1.00"]}]'
         try:
             response = self.client.chat.completions.create(
                 model="gpt-5-mini",
