@@ -39,3 +39,4 @@ reconsider_after=3600
 [openai]
 # add if you want to add a signal for nilsimsa
 api_key=
+sender_skip_llm="root,noreply@github.com"

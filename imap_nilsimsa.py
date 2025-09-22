@@ -23,6 +23,7 @@ import re
 import sys
 import time
 import statistics
+import fnmatch
 from typing import Dict, List, Tuple
 from openai import OpenAI
 from db import DatabaseHelper
@@ -160,6 +161,7 @@ class IMAPAutoSorter:
         self.headers_skip = self._get_list("nilsimsa", "headers_skip")
         self.weight_headers_by = self.config.getint("nilsimsa", "weight_headers_by", fallback=1)
         self.xinclude = self._get_list("nilsimsa", "xinclude")
+        self.sender_skip_llm = self._get_list("openai", "sender_skip_llm")
 
         # MySQL
         self.mysql_pass = self.config.get("mysql", "password")
@@ -254,6 +256,11 @@ class IMAPAutoSorter:
         sys.stdout.flush()
 
     def _classify_email(self, from_addr: str, subject: str):
+        # Fast-path: skip OpenAI call if sender matches configured globs
+        if any(fnmatch.fnmatch((from_addr or "").lower(), pat.lower()) for pat in self.sender_skip_llm):
+            if self.logger: self.logger.info("LLM skipped for sender %s (sender_skip_llm matched)", from_addr)
+            return '[{"cta":"Sender skipped"},{"label":["SenderSkipped:1.00"]}]'
+
         prompt = f"""
 From: {from_addr}
 Subject: {subject}
