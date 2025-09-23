@@ -107,7 +107,7 @@ If the top two folders are not clearly separated:
 ```
 [nilsimsa]
 threshold=85
-min_score=200
+min_score=20
 min_average=30
 min_over=3
 ```
@@ -118,14 +118,14 @@ min_over=3
 ### Example 2: Aggressive filing
 ```
 [nilsimsa]
-threshold=60
-min_score=50
-min_average=0
+threshold=65
+min_score=10
+min_average=0.3
 min_over=1
 ```
 - Even weak similarities (`>60`) are considered.  
 - Only one over-threshold hit is enough.  
-- High recall, but risk of false positives.  
+- Refiles more emails, but risk of false positives.  
 
 ### Example 3: Header weighting
 ```
@@ -141,7 +141,7 @@ weight_headers_by=2
 ```
 [openai]
 api_key=sk-XXXX
-sender_skip_llm=*@trusted.com,alerts@bank.com
+sender_skip_llm=*root*,*alerts@bank.com*
 ```
 - Uses LLM labels to flag suspicious messages.  
 - Skips trusted senders to save tokens and latency.
