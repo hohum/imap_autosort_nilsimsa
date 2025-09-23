@@ -103,7 +103,7 @@ If the top two folders are not clearly separated:
 
 ## EXAMPLES
 
-### Example 1: Conservative filing
+### Example 1: Conservative configuration
 ```
 [nilsimsa]
 threshold=85
@@ -115,7 +115,7 @@ min_over=3
 - At least 3 over-threshold matches are required.  
 - Prevents misfilings but leaves more mail in INBOX.  
 
-### Example 2: Aggressive filing
+### Example 2: Tested operational configuration
 ```
 [nilsimsa]
 threshold=65
@@ -123,7 +123,7 @@ min_score=10
 min_average=0.3
 min_over=1
 ```
-- Even weak similarities (`>60`) are considered.  
+- Close similarities (`>65`) are considered.  
 - Only one over-threshold hit is enough.  
 - Refiles more emails, but risk of false positives.  
 
