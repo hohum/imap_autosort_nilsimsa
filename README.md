@@ -41,7 +41,7 @@ It can also use optional **LLM-based classification (OpenAI API)** for semantic 
 Install via pip:
 
 ```bash
-pip install mysql-connector-python nilsimsa openai python-daemon
+pip install mysql-connector-python openai python-daemon
 ```
 
 ### Database setup
