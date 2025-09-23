@@ -16,6 +16,9 @@ import fcntl
 import hashlib
 import imaplib
 import logging
+from rfc5424_logger import RFC5424Formatter
+import time
+import logging.handlers
 import math
 import os
 import random
@@ -33,13 +36,19 @@ import mysql.connector
 from nilsimsa import Nilsimsa, compare_hexdigests
 import select
 
-def setup_logger(name):
+def setup_logger(name, *, enable_syslog=False, syslog_address="/dev/log",
+                 facility=1, app_name="imap_nilsimsa"):
     logger = logging.getLogger(name)
     log_filename = time.strftime("%Y%m%d", time.localtime()) + ".log"
     if not logger.handlers:
-        file_handler = logging.FileHandler(log_filename)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
-        logger.addHandler(file_handler)
+        fmt = RFC5424Formatter(app_name=app_name, facility=facility)
+        fh = logging.FileHandler(log_filename)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+        if enable_syslog:
+            sh = logging.handlers.SysLogHandler(address=syslog_address)
+            sh.setFormatter(fmt)
+            logger.addHandler(sh)
     logger.setLevel(logging.INFO)
     return logger
 
@@ -184,12 +193,14 @@ class IMAPAutoSorter:
         self.headers_skip_re = re.compile(headers_skip_pattern, re.I)
         self.headerIsX = re.compile(r"^x-", re.I)
 
-        # Logging — daily filename like original, avoid duplicate handlers
-        self.logger = setup_logger("imap_nilsimsa")
+        # Base logger + per-class child (messages propagate to base handlers)
+        base_logger = setup_logger("imap_nilsimsa")
+        self.logger = base_logger.getChild(self.__class__.__name__)
 
-        # DB
-        self.db = DatabaseHelper(self.mysql_pass, self.version, self.logger)
+        # DB logs under its own class name (not IMAPAutoSorter)
+        self.db = DatabaseHelper(self.mysql_pass, self.version, base_logger.getChild("DatabaseHelper"))
         self.imap_helper = IMAPHelper(self.config)
+
 
     # ------------------------------ small helpers ------------------------------
     
@@ -460,7 +471,7 @@ Guidance:
 
         # Prune DB rows for UIDs no longer in the IMAP folder
         if mail_db:
-            print(f"{len(mail_db)} records for cleanup in DB folder[{folder}]")
+            self.logger.info(f"{len(mail_db)} records for cleanup in DB folder[{folder}]")
         for email_uid in list(mail_db.keys()):
             if not quiet:
                 self.status(0, len(mail_db), 'Deleting moved messages ')
@@ -684,7 +695,6 @@ Guidance:
 
     # ------------------------------ archive ------------------------------
     def archive_emails(self, imap: imaplib.IMAP4_SSL, dry_run: bool = False) -> None:
-        self.logger.info(f"---------- Begin Archive check")
         """Archive or delete old emails according to config (unchanged logic)."""
         if not self.archive_folder or self.archive_after <= 0:
             return
@@ -716,7 +726,6 @@ Guidance:
                         imap.expunge()
                 else:
                     print("Dry run: message %s from folder %s would be archived to %s" % (email_uid, folder, target_folder))
-        self.logger.info(f"---------- End Archive check")
 
     # ------------------------------ housekeeping ------------------------------
     def prune_considered(self) -> None:
@@ -741,17 +750,14 @@ Guidance:
         self.autosort_inbox(imap, dry_run, debug, quiet)
 
     def process(self, dry_run: bool = False, debug: bool = False, quiet: bool = False) -> None:
-        self.logger.info(f"## ----- Begin Script run")
         print("\n-----\nProcessing at %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
         imap = self._imap_connect()
         try:
             self._process_core(imap, dry_run, debug, quiet)
         finally:
             self.imap_helper.close()
-            self.logger.info(f"## ----- End Script run")
 
     def process_with_idle(self, dry_run=False, debug=False, quiet=False, loop=False, idle_timeout=900, poll_interval=60):
-        self.logger.info(f"## ----- Begin Script run (IDLE/poll mode)")
         print("\n-----\nProcessing at %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
         imap = self._imap_connect()
         try:
@@ -762,7 +768,6 @@ Guidance:
                     break
         finally:
             self.imap_helper.close()
-            self.logger.info(f"## ----- End Script run")
 
     def supports_idle(self, imap: imaplib.IMAP4_SSL) -> bool:
         """Check if the IMAP server supports the IDLE extension."""
