@@ -583,7 +583,6 @@ Guidance:
 
             for email_uid in email_uids:
                 print("----- Considering message: %s" % email_uid)
-                self.logger.info("---------- Considering message: %s" % email_uid)
                 imap.select(self.todo_folder, readonly=False)
                 res_fetch, data_fetch = imap.uid('fetch', email_uid, '(BODY.PEEK[HEADER])')
                 try:
@@ -591,10 +590,11 @@ Guidance:
                 except Exception:
                     sys.exit("Error: email_uid: %s has no data" % email_uid)
                 
-                msg = email.message_from_string(raw_header)
+                msg = email.message_from_string(raw_header)           
                 print("---------- Source: subject: %s" % msg['Subject'])
+                message_id = (msg.get('Message-ID','') or '').strip()
                 trimmed_header = self.return_header(raw_header)
-                self.logger.info("From: %s", msg['From'])
+                self.logger.info("* New message from: %s, Message-ID: %s", msg['From'], message_id)
                 self.logger.info(trimmed_header)
                 cats = self._classify_email(msg['From'], msg['Subject'])
                 try:
@@ -681,8 +681,7 @@ Guidance:
                                 dst_uid = None
 
                         # --- DB upsert to reflect move (md5 on trimmed_header; hexdigest on categories+trimmed_header) ---
-                        md5sum = hashlib.md5(trimmed_header.encode('utf-8')).hexdigest()
-                        message_id = (msg.get('Message-ID','') or '').strip()                    
+                        md5sum = hashlib.md5(trimmed_header.encode('utf-8')).hexdigest()         
                         self.db.execute(
                             "INSERT INTO nilsimsa (uid, folder, hexdigest, md5sum, trimmed_header, categories, moved_from, message_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
                             (dst_uid, winning_folder, source_hexdigest, md5sum, trimmed_header, cats, self.todo_folder, message_id)
