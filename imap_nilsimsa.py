@@ -31,16 +31,27 @@ from typing import Dict, List, Tuple
 from openai import OpenAI
 from db import DatabaseHelper
 import pprint
+import os
 
-import mysql.connector
+try:
+    import mysql.connector  # used only when db_backend=mysql
+except Exception:
+    mysql = None
+
 from nilsimsa import Nilsimsa, compare_hexdigests
 import select
 
-def setup_logger(name, *, enable_syslog=False, syslog_address="/dev/log",
-                 facility=1, app_name="imap_nilsimsa"):
+def setup_logger(name, *, log_dir='.', logfile=None, enable_syslog=False, syslog_address="/dev/log",
+         facility=1, app_name="imap_nilsimsa"):
     logger = logging.getLogger(name)
-    log_filename = time.strftime("%Y%m%d", time.localtime()) + ".log"
+    log_dir = os.path.expanduser(log_dir)
+    os.makedirs(log_dir, exist_ok=True)
+    log_filename = os.path.join(log_dir, logfile) if logfile else os.path.join(log_dir, time.strftime('%Y%m%d', time.localtime()) + '.log')
     if not logger.handlers:
+        for h in list(logger.handlers):
+            if isinstance(h, logging.FileHandler):
+                logger.removeHandler(h)
+
         fmt = RFC5424Formatter(app_name=app_name, facility=facility)
         fh = logging.FileHandler(log_filename)
         fh.setFormatter(fmt)
@@ -142,6 +153,9 @@ class IMAPAutoSorter:
         self.version = self.config.get("general", "version", fallback="1.2.0b")
         self.maintenance = self.config.getboolean("general", "maintenance", fallback=False)
         self.reconsider_after = self.config.getint("general", "reconsider_after", fallback=3600)
+        log_dir = (self.config.get('general','log_dir',fallback=None) or self.config.get('general','logdir',fallback=None) or self.config.get('general','logpath',fallback='logs')).strip().rstrip('/')
+        self.logfile = self.config.get('general','logfile',fallback=None)
+        log_dir = self.config.get('general', 'log_dir', fallback=log_dir).strip().rstrip('/')
 
         # IMAP folders & lists
         self.todo_folder = self.config.get("imap", "todo")
@@ -173,7 +187,7 @@ class IMAPAutoSorter:
         self.sender_skip_llm = self._get_list("openai", "sender_skip_llm")
 
         # MySQL
-        self.mysql_pass = self.config.get("mysql", "password")
+        self.mysql_pass = self.config.get("mysql", "password", fallback="")
 
         # Archive
         self.archive_folder = self.config.get("archive", "folder", fallback=None)
@@ -194,11 +208,36 @@ class IMAPAutoSorter:
         self.headerIsX = re.compile(r"^x-", re.I)
 
         # Base logger + per-class child (messages propagate to base handlers)
-        base_logger = setup_logger("imap_nilsimsa")
+        base_logger = setup_logger("imap_nilsimsa", log_dir=log_dir, logfile=self.logfile)
         self.logger = base_logger.getChild(self.__class__.__name__)
 
         # DB logs under its own class name (not IMAPAutoSorter)
-        self.db = DatabaseHelper(self.mysql_pass, self.version, base_logger.getChild("DatabaseHelper"))
+        # DB config (select source section based on backend)
+        db_backend = self.config.get("database", "db_backend", fallback="mysql").lower()
+        if db_backend == "sqlite":
+            db_name    = self.config.get("sqlite", "db", fallback="var/lib/imap_autosort/imap_autosort.sqlite")
+            db_host    = "localhost"  # unused
+            db_user    = ""           # unused
+            autocommit = self.config.getboolean("sqlite", "autocommit", fallback=True)
+            self.mysql_pass = ""      # ensure not referenced
+        else:
+            db_name    = self.config.get("mysql", "db",   fallback="imap_nilsimsa")
+            db_host    = self.config.get("mysql", "host", fallback="localhost")
+            # force non-empty; mysql-connector defaults to OS user if empty/missing
+            db_user    = (self.config.get("mysql", "user", fallback="imap_nilsimsa") or "imap_nilsimsa").strip()
+            self.mysql_pass = self.config.get("mysql", "password", fallback="").strip()
+            autocommit = self.config.getboolean("database", "autocommit", fallback=True)
+
+        self.db = DatabaseHelper(
+            mysql_pass=self.mysql_pass,
+            version=self.version,
+            logger=base_logger.getChild("DatabaseHelper"),
+            host=db_host,
+            user=db_user,
+            db=db_name,               # file path when sqlite; schema name when mysql
+            autocommit=autocommit,
+            db_backend=db_backend,    # <-- important
+        )
         self.imap_helper = IMAPHelper(self.config)
 
 
