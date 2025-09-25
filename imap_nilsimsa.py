@@ -833,7 +833,7 @@ def main() -> None:
     parser.add_argument("-q", "--quiet", action="store_true", help="Suppress informational output")
     parser.add_argument("-l", "--loop", type=float, default=0.0, help="Loop delay in seconds (if > 0, script repeats)")
     parser.add_argument("--dry-run", action="store_true", help="Perform a dry run without moving emails")
-    parser.add_argument("--config", type=str, default="imap_autosort.conf", help="Path to configuration file")
+    parser.add_argument("--config", type=str, default="etc/imap_autosort.conf", help="Path to configuration file")
     parser.add_argument("--daemon", action="store_true", help="Run as a background daemon (requires python-daemon)")
     args = parser.parse_args()
 

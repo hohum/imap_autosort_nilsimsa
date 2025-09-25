@@ -12,5 +12,3 @@ stats/*
 backup/*
 etc/*
 var/*
-LOG_imapsync/
-/LOG_imapsync/
