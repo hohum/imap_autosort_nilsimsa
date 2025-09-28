@@ -1,16 +1,58 @@
 """
-Refactor of db.py — unified DB helper for MySQL/MariaDB and SQLite
+Refactor of db.py — unified DB helper for SQLite and MySQL/MariaDB
 ------------------------------------------------------------------
-Goals: keep functionality, reduce duplication/lines, clarify with comments,
-remove overkill error handling, and add a tiny TDD starter.
+Goals: keep functionality identical, reduce duplication/lines, clarify with comments,
+remove overkill error handling.
 
 Drop-in compatible surface:
 - DatabaseHelper.__init__(mysql_pass, version, logger, host, user, db, autocommit, db_backend)
 - execute, executemany, fetchall, fetchone, commit, close
 
 Notes:
-- Still defaults to MySQL unless db_backend=="sqlite".
-- Keeps %s param style at call sites; translated to "?" for SQLite.
+- Defaults to SQLite unless db_backend == "mysql".
+- Call sites may keep using "%s" param style; it's translated to "?" for SQLite.
+
+Contributor notes & LLM guardrails (read this before changing schema or behavior)
+-------------------------------------------------------------------------------
+1) Schema changes require a version bump and a migration plan.
+   - Update the expected `version` string and avoid dropping tables blindly.
+   - If you *must* recreate tables, first check the on-disk/in-DB version; back up
+     or migrate data rather than "nuking" it. Provide a migration path in code.
+
+2) Semantic Versioning policy (avoid version sprawl):
+   - Use MAJOR.MINOR.PATCH (e.g., 1.4.2). Store the full string in the `version` table.
+   - PATCH: backward-compatible fixes (no DDL changes). Safe to increment often.
+   - MINOR: backward-compatible additions (columns nullable/new indexes/defaults only).
+     *Provide automatic, online migrations and keep old reads/writes valid.*
+   - MAJOR: backward-incompatible changes (drop/rename columns, key changes, meaning changes).
+     *Avoid if at all possible.* If unavoidable:
+       • Provide a one-shot migration tool with dry-run + backup.
+       • Support a compatibility window (read old + new) or a feature flag to roll out.
+       • Document a rollback procedure.
+   - Never skip numbers to "reserve" versions. Keep a short, linear history.
+   - Each bump must come with: migration notes, expected runtime impact, and test updates.
+
+3) Backward compatibility: preserve the public API (init + query methods).
+   - If you add methods/kwargs, keep old ones working or emit clear deprecations.
+
+4) MySQL/SQLite parity:
+   - `id` column: MySQL uses `AUTO_INCREMENT`; SQLite uses `INTEGER PRIMARY KEY`.
+     Only use `AUTOINCREMENT` on SQLite if strict monotonic IDs are truly required.
+   - Keep datatypes compatible across both engines.
+
+5) Sync/clone tools depend on stable constraints.
+   - Unique keys and composite constraints must remain consistent; document changes.
+
+6) Error handling policy:
+   - Fail fast on connect/bootstrap but prefer raising exceptions (let callers decide)
+     over hard `sys.exit`, unless a fatal bootstrap error makes continuation unsafe.
+
+7) Logging:
+   - Use the provided logger; don't print except for fatal bootstrap errors.
+
+8) Tests:
+   - When you change schema or DDL, add/update tests (SQLite at minimum) and include
+     a migration test if you bump the version.
 """
 from __future__ import annotations
 
@@ -180,6 +222,3 @@ class DatabaseHelper:
         except (MySQLError, sqlite3.Error) as e:  # type: ignore[name-defined]
             self.logger.error("Database bootstrap error: %s", e)
             raise
-
-
-
