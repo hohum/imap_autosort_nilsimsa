@@ -29,28 +29,30 @@ class LLMClassifier:
             return '[{"cta":"Notice LLM not configured"},{"label":[["Unclassified:1.00"]]}]', False
 
         prompt = (
-            msg_header + "\n\n" + r'''
+            r'''
 Return exactly one JSON array with two objects:
 [{"cta":"..."},{"label":[["X",0.00],["Y",0.00],["Z",0.00],["A",0.00],["B",0.00]]}]
 
 Rules:
-- Keys and all string values MUST use double quotes.
-- Provide ≥5 labels as pairs [<string>, <number>]; probabilities have two decimals and sum to 1.00.
+- JSON output returned
+  - must be valid
+  - Keys and all string values MUST use double quotes.
+  - Output the JSON document directly — no quotes, no code fences, no extra text.
+- Provide ≥5 labels; probabilities have two decimals and sum to 1.00.
 - CTA: 3–10 words, imperative, generic, dictionary words only (avoid “now”, “immediately”, etc.); include a generic but relevant domain noun if obvious (e.g., “Review military aircraft discussion thread”).
 - Use From/Subject + domain for inference; prefer abstract action (don’t parrot topic words/brands unless essential for safety/finance).
 - Labels: noun phrases, sorted desc; include "Spam" and/or "Phishing Suspected" only if very confident.
-- Output the JSON document directly — no quotes, no code fences, no extra text.
 
 Guidance:
 - Detect distinctive signals — including subtle role phrases — and generalize into brand-agnostic concepts; capture oddities that differentiate the message; avoid proper nouns/department names and fixed keyword lists; do not over-prioritize any single field (e.g., “photo desk” ⇒ “photo”).
 - Some emails are internal notifications from my own systems (e.g., Macrodroid, fail2ban).
-'''
+''' + "\n\n" + msg_header
         )
         try:
             response = self.client.chat.completions.create(
                 model="gpt-5-mini",
                 messages=[
-                    {"role": "system", "content": "You are an email intent detector."},
+                    {"role": "system", "content": "You are professor of email header finger-printing and you are adding signals for intent and secondly looking for malicious email."},
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0,      # most deterministic
