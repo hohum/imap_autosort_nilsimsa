@@ -1,94 +1,63 @@
 from __future__ import annotations
-from typing import List, Optional
-import json
+from typing import List, Optional, Tuple
+import fnmatch
+import re
 
 try:
     from openai import OpenAI  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover
     OpenAI = None  # type: ignore
 
 class LLMClassifier:
-    """Thin wrapper for email intent classification via OpenAI.
-    Handles sender_skip_llm globs and missing API key gracefully.
-    """
+    """Email intent classification via OpenAI. Optional and tolerant."""
     def __init__(self, api_key: Optional[str], sender_skip_globs: List[str], logger=None) -> None:
-        self.logger = logger
+        self.api_key = (api_key or "").strip()
         self.sender_skip_globs = [g.lower() for g in (sender_skip_globs or [])]
-        self.client = None
-        api_key = (api_key or '').strip()
-        if api_key and OpenAI is not None:
-            try:
-                self.client = OpenAI(api_key=api_key)
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning("LLM client init failed: %s", e)
-                self.client = None
+        self.logger = logger
 
-    def _classify_email(self, msg_header: str) -> tuple[str, bool]:
-        if not self.client:
-            return '[{"cta":"Notice LLM not configured"},{"label":[["Unclassified:1.00"]]}]', False
-
-        prompt = (
-            r'''
-Return exactly one JSON array with two objects:
-[{"cta":"..."},{"label":[["X",0.00],["Y",0.00],["Z",0.00],["A",0.00],["B",0.00]]}]
-
-Rules:
-- JSON output returned
-  - must be valid
-  - Keys and all string values MUST use double quotes.
-  - Output the JSON document directly — no quotes, no code fences, no extra text.
-- Provide ≥5 labels; probabilities have two decimals and sum to 1.00.
-- CTA: 3–10 words, imperative, generic, dictionary words only (avoid “now”, “immediately”, etc.); include a generic but relevant domain noun if obvious (e.g., “Review military aircraft discussion thread”).
-- Use From/Subject + domain for inference; prefer abstract action (don’t parrot topic words/brands unless essential for safety/finance).
-- Labels: noun phrases, sorted desc; include "Spam" and/or "Phishing Suspected" only if very confident.
-
-Guidance:
-- Detect distinctive signals — including subtle role phrases — and generalize into brand-agnostic concepts; capture oddities that differentiate the message; avoid proper nouns/department names and fixed keyword lists; do not over-prioritize any single field (e.g., “photo desk” ⇒ “photo”).
-- Some emails are internal notifications from my own systems (e.g., Macrodroid, fail2ban).
-''' + "\n\n" + msg_header
-        )
+    def classify_email(self, header_block: str) -> Tuple[str, bool]:
+        """Public safe wrapper so callers don't rely on a private method."""
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-5-mini",
-                messages=[
-                    {"role": "system", "content": "You are professor of email header finger-printing and you are adding signals for intent and secondly looking for malicious email."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0,      # most deterministic
-                top_p=1,            # no nucleus sampling
-                presence_penalty=0,
-                frequency_penalty=0,
-                timeout=60,
-            )
-            result = (response.choices[0].message.content or "").strip()
+            return self._classify_email(header_block)
+        except Exception as e:
             if self.logger:
-                self.logger.info("ChatGPT API response: %s", result)
-            # get and return flag is_suss
-            is_suss = False
-            try:
-                data = json.loads(result)
-                if isinstance(data, list):
-                    label_obj = next((o for o in data if isinstance(o, dict) and "label" in o), None)
-                    if label_obj:
-                        for item in label_obj["label"]:
-                            # New schema: ["Label", 0.00]
-                            if isinstance(item, list) and len(item) == 2:
-                                name, prob = item[0], item[1]
-                                try:
-                                    p = float(prob)
-                                except Exception:
-                                    continue
-                                if name in ("Spam", "Phishing Suspected") and p >= 0.50:
-                                    is_suss = True
-                                    break
-            except json.JSONDecodeError:
-                # leave is_suss = False on malformed output
-                pass
-                        
+                self.logger.error("LLM classify_email exception: %s", e)
+            return '[{"cta":"Notice LLM internal error"},{"label":["Unclassified:1.00"]}]', False
+
+    def _classify_email(self, header_block: str) -> Tuple[str, bool]:
+        # Sender skip guard
+        from_addr = ""
+        m = re.search(r"^From:\s*(.*)$", header_block, re.I | re.M)
+        if m:
+            raw_from = (m.group(1) or "").strip()
+            addr_match = re.search(r"<([^>]+)>", raw_from)
+            from_addr = (addr_match.group(1) if addr_match else raw_from).strip().lower()
+        if any(fnmatch.fnmatch(from_addr, pat) for pat in self.sender_skip_globs):
+            if self.logger:
+                self.logger.info("LLM skipped for sender %s (sender_skip_llm matched)", from_addr)
+            return '[{"cta":"Sender skipped"},{"label":["SenderSkipped:1.00"]}]', False
+
+        # Fallback if API unavailable
+        if not self.api_key or not OpenAI:
+            return '[{"cta":"Notice LLM not configured"},{"label":["Unclassified:1.00"]}]', False
+
+        # Call OpenAI
+        try:
+            client = OpenAI(api_key=self.api_key)  # type: ignore
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an email intent detector."},
+                    {"role": "user", "content": header_block},
+                ],
+            )
+            result = (resp.choices[0].message.content or "").strip()
+            if self.logger:
+                self.logger.info("LLM API response: %s", result)
+            is_suss = bool(re.search(r'\b(Spam|Phishing)\b', result, re.I))
             return result, is_suss
         except Exception as e:
             if self.logger:
                 self.logger.error("GPT classification error: %s", e)
-            return '[{"cta":"Notice LLM not configured"},{"label":[["Unclassified",1.00]]}]', False
+            return '[{"cta":"Notice LLM classification error"},{"label":["Unclassified:1.00"]}]', False
 

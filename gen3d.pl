@@ -14,20 +14,20 @@ opendir(STATS,".");
 foreach $file(grep(-f && /\.csv$/ && !/^\./,readdir(STATS))) {
   push(@files,$file);
 };
-closedir(DIR);
+closedir(STATS);
 
 @threed_files=grep(/\.3d\.csv$/,@files);
 map(s/\.3d//,@threed_files);
 
 for $file(@files) {
-  next if $file ~~ @threed_files || $file=~/\.3d\./;
+  next if (grep { $_ eq $file } @threed_files) || $file=~/\.3d\./;
   print "Considering $file\n";
   my %threed;
   $newfile=$file;
   $newfile=~s/\.csv$/.3d.csv/;
   open(IN,$file);
   while(<IN>) {
-    chomp; ~s/\r//g;
+    chomp; s/\r//g;
     my($folder,$distance)=split ',';
     if (defined($threed{$folder}{$distance})) {
       $threed{$folder}{$distance}++;

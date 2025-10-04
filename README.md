@@ -117,10 +117,10 @@ It is **not** a plug-and-play desktop app — it’s intended for technical user
 
 ### Code structure
 
-- **`imap_nilsimsa.py`** — main entry point; IMAP connection, header normalization, Nilsimsa scoring, autosort logic, and CLI.  
-- **`db.py`** — database helper class, schema initialization, query helpers.  
-- **`rfc5424_logger.py`** — structured logger formatter (RFC 5424) with optional syslog support.  
-- **`imap_autosort.conf.sample`** — example configuration file.  
+- `imap_nilsimsa.py` — main entry point; IMAP connection, header normalization, Nilsimsa scoring, autosort logic, and CLI.  
+- `db.py` — database helper class, schema initialization, query helpers.  
+- `logging_setup.py` — structured logger setup with RFC 5424-style formatting and optional syslog support.  
+- `imap_autosort.conf.sample` — example configuration file.  
 
 ### Database schema
 

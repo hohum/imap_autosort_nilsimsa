@@ -22,47 +22,46 @@ def normalize_header(
     weight_headers_re: re.Pattern,
     weight_headers_by: int,
 ) -> str:
-    # Strip weekday banners early (cheap pre-pass)
-    mail_txt = re.sub(r'(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat).*?([;\n])', r'\1', mail_txt)
-
-    result: List[str] = []
     msg = email.message_from_string(mail_txt)
+    out: List[str] = []
+    xincl = {h.lower() for h in (xinclude or [])}
 
-    for header in sorted(set(msg.keys())):
-        if exclude_headers.search(header) or headers_skip_re.search(header):
+    for header in sorted(set(msg.keys() or [])):
+        if exclude_headers.search(header):
             continue
-        # Drop most X- headers unless explicitly kept
-        if headerIsX.search(header) and header not in xinclude:
+        if headers_skip_re.search(header) and (header.lower() not in xincl):
             continue
 
-        for value in msg.get_all(header, []):
-            # Unfold header lines and preserve bytes via backslash escapes
-            value = chomp_header.sub(' ', value.encode('ascii', 'backslashreplace').decode()) + "\n"
+        vals = msg.get_all(header, []) or []
 
+        # DKIM: keep only the d= token from each DKIM-Signature value
+        if header == 'DKIM-Signature':
+            toks: List[str] = []
+            for v in vals:
+                s = str(v)  # do not unfold DKIM; extract only token
+                toks.append(dkim_just_d.sub(lambda m: m.group(1), s))
+            if toks:
+                out.append(f"{header}: " + ", ".join(toks))
+            continue
+
+        for v in vals:
+            s = chomp_header.sub(' ', str(v))  # unfold folded headers
             if header in {'Received', 'X-Received'}:
-                # Remove amavis noise and local Received lines
-                if re.search(r'port 10024', value):
+                if 'port 10024' in s:
                     continue
-                if header == 'Received' and exclude_received_from_localhost.search(value):
+                if header == 'Received' and exclude_received_from_localhost.search(s):
                     continue
-                # Trim typical volatile bits
-                value = re.sub(r' id \S+', '', value)
-                value = re.sub(r' (Sun|Mon|Tue|Wed|Thu|Fri|Sat),', '', value)
-                value = re.sub(r' (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', '', value)
-                value = re.sub(r' \d{4}-\d{2}-\d{2}', '', value)
-                value = re.sub(r' \d{2}:\d{2}:\d{2}(\.\d+)*', '', value)
-                value = re.sub(r' ( [A-Z]{3,4} )*m=\+\d+\.\d+', '', value)
-                value = re.sub(r' \+\d{4}( (\([A-Z]{3,4}\)))*', '', value)
-                value = re.sub(r' \(.*?\) by ', ' by ', value)
-                add = f"{header}: {value}"
-            elif header == 'DKIM-Signature':
-                add = f"{header}: {dkim_just_d.sub(lambda m: m.group(1), value)}\n"
-            else:
-                add = f"{header}: {value}"
-
-            # Header weighting: exact same effect as original (string repetition)
+                s = re.sub(r' id \S+', '', s)
+                s = re.sub(r' (Sun|Mon|Tue|Wed|Thu|Fri|Sat),', '', s)
+                s = re.sub(r' (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', '', s)
+                s = re.sub(r' \d{4}-\d{2}-\d{2}', '', s)
+                s = re.sub(r' \d{2}:\d{2}:\d{2}(\.\d+)*', '', s)
+                s = re.sub(r' ( [A-Z]{3,4} )*m=\+\d+\.\d+', '', s)
+                s = re.sub(r' \+\d{4}( (\([A-Z]{3,4}\)))*', '', s)
+                s = re.sub(r' \(.*?\) by ', ' by ', s)
+            out.append(f"{header}: {s}")
             if weight_headers_re.search(header):
-                add += add * weight_headers_by
-            result.append(add)
+                for _ in range(max(0, weight_headers_by - 1)):
+                    out.append(f"{header}: {s}")
 
-    return ''.join(result)
+    return "\n".join(out) + "\n"

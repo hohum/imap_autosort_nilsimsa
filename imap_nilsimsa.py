@@ -152,9 +152,33 @@ class IMAPAutoSorter:
         self.headers_skip = self._get_list("nilsimsa", "headers_skip")
         self.weight_headers_by = self.config.getint("nilsimsa", "weight_headers_by", fallback=1)
         self.xinclude = self._get_list("nilsimsa", "xinclude")
+
+        # Regex/filters required by header_normalizer.normalize_header
+        self.exclude_headers = re.compile(
+            r"^(Date|Message-ID|X-.*Mailscanner.*|X-Amavis-.*|X-Spam-.*|X-Virus-.*|ARC-.*)$",
+            re.I,
+        )
+        self.chomp_header = re.compile(r"[\r\n]+\s*", re.M)
+        self.headerIsX = re.compile(r"^x-", re.I)
+        # DKIM extractor: capture only d=... and consume the full value
+        self.dkim_just_d = re.compile(r"(?is)\A.*?\b(d=[^;\s]+).*\Z")
+        # Exclude local Received lines
+        self.exclude_received_from_localhost = re.compile(r"^from\s+(localhost|marcsnet\.com)\s+", re.I)
+        # Weighting/selective header patterns from config lists
+        weight_headers_pattern = r"^(" + "|".join(self.weight_headers) + r")$" if self.weight_headers else r"^$"
+        self.weight_headers_re = re.compile(weight_headers_pattern, re.I)
+        headers_skip_pattern = r"^(" + "|".join(self.headers_skip) + r")$" if self.headers_skip else r"^$"
+        self.headers_skip_re = re.compile(headers_skip_pattern, re.I)
+
+        # Archive-related config used by archive_emails
+        self.archive_folder = self.config.get("archive", "folder", fallback="")
+        self.archive_after = self.config.getint("archive", "after_days", fallback=0)
+        self.trash_folder = self.config.get("archive", "trash_folder", fallback="INBOX.trash")
+        self.just_delete = self._get_list("archive", "just_delete")
+ 
         # Logger
         self.logger = setup_logger("imap_nilsimsa", log_dir=self.log_dir, logfile=self.logfile, enable_syslog=self.enable_syslog)
-        # Now that logger exists, init LLM
+        # Initialize LLM after logger exists (only once)
         self.llm = LLMClassifier(self.api_key, self.sender_skip_llm, logger=self.logger)
 
         # Database config & helper
@@ -334,7 +358,7 @@ class IMAPAutoSorter:
                         chosen = next((c for (_id, _uid, _folder, c, _hex) in md5_rows if c and ('Unclassified' not in c)), None)
                         if not chosen:
                             msg = email.message_from_string(raw_header)
-                            chosen, _ = self.llm._classify_email(
+                            chosen, _ = self.llm.classify_email(
                                 f"From: {msg.get('From','')}\nSubject: {msg.get('Subject','')}"
                             )
                         cats = chosen
@@ -427,7 +451,7 @@ class IMAPAutoSorter:
                 self.logger.info("* New message from: %s, Message-ID: %s", msg['From'], message_id)
                 self.logger.info(trimmed_header)
 
-                cats, is_suss = self.llm._classify_email(
+                cats, is_suss = self.llm.classify_email(
                     f"From: {msg.get('From','')}\nSubject: {msg.get('Subject','')}"
                 )
                 if is_suss:
@@ -540,6 +564,17 @@ class IMAPAutoSorter:
             self.logger.error("Archiving error: %s", e)
         print("Sorting mail")
         self.autosort_inbox(imap, dry_run, debug, quiet)
+
+    # Add missing idle_or_poll used by process_with_idle
+    def idle_or_poll(self, imap, folder: str, poll_interval: int = 60, idle_timeout: int = 900) -> None:
+        try:
+            if imap_supports_idle(imap):
+                imap_idle_wait(imap, idle_timeout)
+            else:
+                time.sleep(poll_interval)
+        except Exception as e:
+            self.logger.error("IMAP IDLE/poll error for %s: %s", folder, e)
+            time.sleep(poll_interval)
 
     # ------------------------------ execution modes ------------------------------
 
