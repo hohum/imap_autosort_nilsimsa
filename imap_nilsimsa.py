@@ -74,18 +74,14 @@ import configparser
 import email
 import errno
 import fcntl
--import fnmatch
 import hashlib
 import imaplib
 import logging
 import logging.handlers
-# import math  # removed; scoring moved to sorter_engine
 import os
+import sys
 import random
 import re
-- import select
-import statistics
-import sys
 import time
 from typing import Dict, List, Tuple
 
@@ -529,8 +525,7 @@ class IMAPAutoSorter:
                     typ, data = imap.uid('MOVE', email_uid, '"%s"' % winning_folder)
                     if typ == 'OK':
                         dst_uid = None
--                        info = self._extract_copyuid((typ, data)) or self._extract_copyuid(('OK', getattr(imap, 'untagged_responses', {}).get('OK', [])))
-+                        info = extract_copyuid((typ, data)) or extract_copyuid(('OK', getattr(imap, 'untagged_responses', {}).get('OK', [])))
+                        info = extract_copyuid((typ, data)) or extract_copyuid(('OK', getattr(imap, 'untagged_responses', {}).get('OK', [])))
                         if info:
                             _uidv, src_uids, dst_uids = info
                             try:
