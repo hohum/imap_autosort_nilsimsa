@@ -6,62 +6,76 @@ Refactor rules
    - remove overkill error handling.
 """
 
+from __future__ import annotations
 import re
 import email
 from typing import List
 
+def _unfold(header_block: str) -> List[str]:
+	# RFC 5322 unfold: continuation lines (starting with WSP) join previous line with a space
+	lines = header_block.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+	out: List[str] = []
+	for line in lines:
+		if not line:
+			continue
+		if line[:1] in (" ", "\t") and out:
+			out[-1] = f"{out[-1]} {line.strip()}"
+		else:
+			out.append(line.rstrip())
+	return out
+
 def normalize_header(
-    mail_txt: str,
-    exclude_headers: re.Pattern,
-    headers_skip_re: re.Pattern,
-    chomp_header: re.Pattern,
-    headerIsX: re.Pattern,
-    xinclude: List[str],
-    dkim_just_d: re.Pattern,
-    exclude_received_from_localhost: re.Pattern,
-    weight_headers_re: re.Pattern,
-    weight_headers_by: int,
+	mail_txt: str,
+	*,
+	exclude_headers: re.Pattern,
+	headers_skip_re: re.Pattern,
+	chomp_header: re.Pattern,
+	headerIsX: re.Pattern,
+	xinclude: List[str],
+	dkim_just_d: re.Pattern,
+	exclude_received_from_localhost: re.Pattern,
+	weight_headers_re: re.Pattern,
+	weight_headers_by: int,
 ) -> str:
-    msg = email.message_from_string(mail_txt)
-    out: List[str] = []
-    xincl = {h.lower() for h in (xinclude or [])}
+	# Precompute x-include set (case-insensitive)
+	xinclude_lc = {h.lower() for h in (xinclude or [])}
 
-    for header in sorted(set(msg.keys() or [])):
-        if exclude_headers.search(header):
-            continue
-        if headers_skip_re.search(header) and (header.lower() not in xincl):
-            continue
+	result_lines: List[str] = []
 
-        vals = msg.get_all(header, []) or []
+	for raw in _unfold(mail_txt):
+		if ":" not in raw:
+			continue
+		name, value = raw.split(":", 1)
+		hname = name.strip()
+		hval = value.strip()
 
-        # DKIM: keep only the d= token from each DKIM-Signature value
-        if header == 'DKIM-Signature':
-            toks: List[str] = []
-            for v in vals:
-                s = str(v)  # do not unfold DKIM; extract only token
-                toks.append(dkim_just_d.sub(lambda m: m.group(1), s))
-            if toks:
-                out.append(f"{header}: " + ", ".join(toks))
-            continue
+		# Skip excluded headers (e.g., Date, Message-ID, noisy X-headers, ARC-*)
+		if exclude_headers.search(hname):
+			continue
+		# Skip headers by explicit skip regex
+		if headers_skip_re.search(hname):
+			continue
+		# Skip local Received lines
+		if hname.lower() == "received" and exclude_received_from_localhost.search(hval):
+			continue
+		# Only include allowed X- headers if xinclude list is provided
+		if headerIsX.search(hname) and xinclude_lc and hname.lower() not in xinclude_lc:
+			continue
+		# DKIM: reduce to d=... token if present
+		if hname.lower() == "dkim-signature":
+			m = dkim_just_d.match(hval)
+			if m:
+				hval = m.group(1)
 
-        for v in vals:
-            s = chomp_header.sub(' ', str(v))  # unfold folded headers
-            if header in {'Received', 'X-Received'}:
-                if 'port 10024' in s:
-                    continue
-                if header == 'Received' and exclude_received_from_localhost.search(s):
-                    continue
-                s = re.sub(r' id \S+', '', s)
-                s = re.sub(r' (Sun|Mon|Tue|Wed|Thu|Fri|Sat),', '', s)
-                s = re.sub(r' (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', '', s)
-                s = re.sub(r' \d{4}-\d{2}-\d{2}', '', s)
-                s = re.sub(r' \d{2}:\d{2}:\d{2}(\.\d+)*', '', s)
-                s = re.sub(r' ( [A-Z]{3,4} )*m=\+\d+\.\d+', '', s)
-                s = re.sub(r' \+\d{4}( (\([A-Z]{3,4}\)))*', '', s)
-                s = re.sub(r' \(.*?\) by ', ' by ', s)
-            out.append(f"{header}: {s}")
-            if weight_headers_re.search(header):
-                for _ in range(max(0, weight_headers_by - 1)):
-                    out.append(f"{header}: {s}")
+		# Collapse internal whitespace/newlines per provided regex
+		if chomp_header:
+			hval = chomp_header.sub(" ", hval).strip()
 
-    return "\n".join(out) + "\n"
+		# Emit, applying weighting if configured
+		repeats = max(1, int(weight_headers_by)) if weight_headers_re.search(hname) else 1
+		line = f"{hname}: {hval}"
+		for _ in range(repeats):
+			result_lines.append(line)
+
+	# Join with newline to produce a stable, hashable block
+	return "\n".join(result_lines)
