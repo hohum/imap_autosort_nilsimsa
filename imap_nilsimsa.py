@@ -224,7 +224,7 @@ class IMAPAutoSorter:
         # Regexes (kept same semantics; precompiled for clarity/speed)
         self.exclude_headers = re.compile(r"^(Date|Message-ID|X-.*Mailscanner.*|X-Amavis-.*|X-Spam-.*|X-Virus-.*|ARC-.*)$", re.I)
         self.no_dates_received = re.compile(r";\s+.*$", re.M | re.I)
-        self.dkim_just_d = re.compile(r"(?is)^.*?\b((?:d|s|i)=[^;\s]+).*$")
+        self.dkim_just_d = re.compile(r"(?is)\A.*?\b(d=[^;\s]+).*\Z")
         self.chomp_header = re.compile(r"[\r\n]+\s*", re.M)
         self.exclude_received_from_localhost = re.compile(r"^from\s+(localhost|marcsnet\.com)\s+", re.I)
         weight_headers_pattern = r"^(" + "|".join(self.weight_headers) + r")$" if self.weight_headers else r"^$"
