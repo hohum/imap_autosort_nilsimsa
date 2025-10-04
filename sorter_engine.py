@@ -144,6 +144,6 @@ def decide_winner(
             break
         else:
             T += 5
-            logger.info("LADDER (ratio gap %.3f < %.3f) → raise T to %d", ratio_gap, tie_ratio_gap, T)r.info("LADDER (ratio gap %.3f < %.3f) → raise T to %d", ratio_gap, tie_ratio_gap, T)
+            logger.info("LADDER (ratio gap %.3f < %.3f) -> raise T to %d", ratio_gap, tie_ratio_gap, T)
 
     return winning_folder, winning_score
