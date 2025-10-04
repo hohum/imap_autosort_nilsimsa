@@ -63,9 +63,7 @@ Guidance:
         from_addr = ""
         m = re.search(r"^From:\s*(.*)$", header_block, re.I | re.M)
         if m:
-            raw_from = (m.group(1) or "").strip()
-            addr_match = re.search(r"<([^>]+)>", raw_from)
-            from_addr = (addr_match.group(1) if addr_match else raw_from).strip().lower()
+            from_addr = (m.group(1) or "").strip().lower()
         if any(fnmatch.fnmatch(from_addr, pat) for pat in self.sender_skip_globs):
             if self.logger:
                 self.logger.info("LLM skipped for sender %s (sender_skip_llm matched)", from_addr)
@@ -80,7 +78,7 @@ Guidance:
             client = OpenAI(api_key=self.api_key)  # type: ignore
             prompt = f"{self.USER_PROMPT_TEMPLATE}\n\n{header_block}"
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-5-mini",
                 messages=[
                     {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
@@ -98,6 +96,8 @@ Guidance:
             return result, is_suss
         except Exception as e:
             if self.logger:
+                self.logger.error("GPT classification error: %s", e)
+            return '[{"cta":"Notice LLM classification error"},{"label":["Unclassified:1.00"]}]', False
                 self.logger.error("GPT classification error: %s", e)
             return '[{"cta":"Notice LLM classification error"},{"label":["Unclassified:1.00"]}]', False
 
