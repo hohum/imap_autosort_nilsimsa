@@ -672,14 +672,27 @@ class IMAPAutoSorter:
                 while True:
                     stats: dict[str, Tuple[float, float]] = {}
                     sum_av = 0.0
+                    best_pair: Tuple[float, float] | None = None  # (score, avg), best by (avg, then score)
                     for f, d in dist_cache.items():
                         sc, av = self.score_folder(f, d, T, debug, quiet)
                         stats[f] = (sc, av)
                         sum_av += max(0.0, av)
+                        if (best_pair is None) or (av, sc) > (best_pair[1], best_pair[0]):
+                            best_pair = (sc, av)
 
                     if sum_av <= 0.0:
                         self.logger.info("T=%d | no over-threshold signal; skipping ladder", T)
-                        self.logger.info("RESOLVE @T=%d | no folder clears minimums; using new_folder", T)
+                        # Report only which minimums failed using cached best_pair
+                        fails = "none"
+                        if best_pair is not None:
+                            bs, ba = best_pair
+                            parts = []
+                            if bs <= self.min_score:
+                                parts.append(f"score {bs:.2f}/{self.min_score:.2f}")
+                            if ba <= self.min_average:
+                                parts.append(f"avg {ba:.2f}/{self.min_average:.2f}")
+                            fails = "; ".join(parts) or "none"
+                        self.logger.info("RESOLVE @T=%d | no folder clears minimums; fails: %s; using new_folder", T, fails)
                         break
 
                     ranked = sorted(stats.items(), key=lambda it: (it[1][1], it[1][0]), reverse=True)
@@ -700,7 +713,14 @@ class IMAPAutoSorter:
                                 T, winning_folder, lead_av, lead_sc, tie_ratio_gap,
                             )
                         else:
-                            self.logger.info("RESOLVE @T=%d | no folder clears minimums; using new_folder", T)
+                            # Only list the thresholds that were not met for the leader
+                            parts = []
+                            if lead_sc <= self.min_score:
+                                parts.append(f"score {lead_sc:.2f}/{self.min_score:.2f}")
+                            if lead_av <= self.min_average:
+                                parts.append(f"avg {lead_av:.2f}/{self.min_average:.2f}")
+                            fails = "; ".join(parts) or "none"
+                            self.logger.info("RESOLVE @T=%d | no folder clears minimums; fails: %s; using new_folder", T, fails)
                         break
                     else:
                         T += 5
