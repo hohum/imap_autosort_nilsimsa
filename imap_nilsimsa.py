@@ -74,7 +74,7 @@ import configparser
 import email
 import errno
 import fcntl
-import fnmatch
+-import fnmatch
 import hashlib
 import imaplib
 import logging
@@ -83,86 +83,28 @@ import logging.handlers
 import os
 import random
 import re
-import select
+- import select
 import statistics
 import sys
 import time
 from typing import Dict, List, Tuple
 
-from rfc5424_logger import RFC5424Formatter
 from nilsimsa import Nilsimsa, compare_hexdigests
 from llm import LLMClassifier
 from db import DatabaseHelper
 from header_normalizer import normalize_header
-from sorter_engine import decide_winner  # new
+from sorter_engine import decide_winner
+from logging_setup import setup_logger
+from imap_helper import IMAPHelper
+from imap_idle import supports_idle as imap_supports_idle, idle_wait as imap_idle_wait
+from imap_utils import parse_uid_set, extract_copyuid
 
 try:  # used only when db_backend=mysql; keep import optional
     import mysql.connector  # noqa: F401
 except Exception:  # pragma: no cover
     mysql = None  # noqa: F401
 
-# ------------------------------ logging ------------------------------
-
-def setup_logger(
-    name: str,
-    *,
-    log_dir: str = '.',
-    logfile: str | None = None,
-    enable_syslog: bool = False,
-    syslog_address: str = "/dev/log",
-    facility: int = 1,
-    app_name: str = "imap_nilsimsa",
-):
-    """Create a file+optional-syslog logger. Idempotent per name.
-
-    Behavior preserved: default filename is YYYYMMDD.log when `logfile` is None.
-    """
-    logger = logging.getLogger(name)
-    log_dir = os.path.expanduser(log_dir)
-    os.makedirs(log_dir, exist_ok=True)
-    log_filename = os.path.join(
-        log_dir,
-        logfile if logfile else time.strftime('%Y%m%d', time.localtime()) + '.log',
-    )
-
-    if not logger.handlers:  # avoid duplicate handlers
-        fmt = RFC5424Formatter(app_name=app_name, facility=facility)
-        fh = logging.FileHandler(log_filename)
-        fh.setFormatter(fmt)
-        logger.addHandler(fh)
-        if enable_syslog:
-            sh = logging.handlers.SysLogHandler(address=syslog_address)
-            sh.setFormatter(fmt)
-            logger.addHandler(sh)
-    logger.setLevel(logging.INFO)
-    return logger
-
 # ------------------------------ helpers ------------------------------
-
-class IMAPHelper:
-    def __init__(self, config: configparser.ConfigParser):
-        self.server = config.get('imap', 'server')
-        self.username = config.get('imap', 'username')
-        self.password = config.get('imap', 'password')
-        self.imap: imaplib.IMAP4_SSL | None = None
-
-    def connect(self) -> imaplib.IMAP4_SSL:
-        self.imap = imaplib.IMAP4_SSL(self.server)
-        self.imap.login(self.username, self.password)
-        return self.imap
-
-    def close(self) -> None:
-        if not self.imap:
-            return
-        # Be tolerant of server state when closing.
-        for op in (lambda: self.imap.close(), lambda: self.imap.logout()):  # type: ignore[union-attr]
-            try:
-                op()
-            except Exception:
-                pass
-        self.imap = None
-
-
 
 class IMAPAutoSorter:
     """Sort emails into folders by Nilsimsa similarity of headers.
@@ -197,9 +139,8 @@ class IMAPAutoSorter:
         self.todo_folder = self.config.get("imap", "todo")
         self.new_folder = self.config.get("imap", "new")
         self.imap_folders = self._get_list("imap", "folders")
-        # Needed before LLMClassifier init
+        # For LLMClassifier
         self.sender_skip_llm = self._get_list("openai", "sender_skip_llm")
-
         # LLM classifier (shared in llm.py)
         api_key = self.config.get("openai", "api_key", fallback=None)
         self.llm = LLMClassifier(api_key, self.sender_skip_llm, logger=None)
@@ -224,6 +165,7 @@ class IMAPAutoSorter:
         # Regexes (kept same semantics; precompiled for clarity/speed)
         self.exclude_headers = re.compile(r"^(Date|Message-ID|X-.*Mailscanner.*|X-Amavis-.*|X-Spam-.*|X-Virus-.*|ARC-.*)$", re.I)
         self.no_dates_received = re.compile(r";\s+.*$", re.M | re.I)
+        # Extract just the d= token from DKIM-Signature values
         self.dkim_just_d = re.compile(r"(?is)\A.*?\b(d=[^;\s]+).*\Z")
         self.chomp_header = re.compile(r"[\r\n]+\s*", re.M)
         self.exclude_received_from_localhost = re.compile(r"^from\s+(localhost|marcsnet\.com)\s+", re.I)
@@ -335,22 +277,6 @@ class IMAPAutoSorter:
             print("")
         sys.stdout.flush()
 
-    # ------------------------------ header normalization ------------------------------
-
-    def return_header(self, mail_txt: str) -> str:
-        return normalize_header(
-            mail_txt,
-            self.exclude_headers,
-            self.headers_skip_re,
-            self.chomp_header,
-            self.headerIsX,
-            self.xinclude,
-            self.dkim_just_d,
-            self.exclude_received_from_localhost,
-            self.weight_headers_re,
-            self.weight_headers_by,
-        )
-
     # ------------------------------ core: sync & distance ------------------------------
 
     def sync_and_distance(
@@ -395,7 +321,18 @@ class IMAPAutoSorter:
                 # Not in DB → normalize header and derive md5 over trimmed header
                 res_fetch, data_fetch = imap.uid('fetch', email_uid, '(BODY.PEEK[HEADER])')
                 raw_header = data_fetch[0][1].decode('utf-8', 'backslashreplace') if data_fetch and data_fetch[0] else ''
-                trimmed_header = self.return_header(raw_header)
+                trimmed_header = normalize_header(
+                    mail_txt=raw_header,
+                    exclude_headers=self.exclude_headers,
+                    headers_skip_re=self.headers_skip_re,
+                    chomp_header=self.chomp_header,
+                    headerIsX=self.headerIsX,
+                    xinclude=self.xinclude,
+                    dkim_just_d=self.dkim_just_d,
+                    exclude_received_from_localhost=self.exclude_received_from_localhost,
+                    weight_headers_re=self.weight_headers_re,
+                    weight_headers_by=self.weight_headers_by,
+                )
                 md5sum = hashlib.md5(trimmed_header.encode('utf-8')).hexdigest()
                 # Look up any rows with this md5 (same normalized header)
                 self.db.execute("SELECT id, uid, folder, categories, hexdigest FROM nilsimsa WHERE md5sum = %s", (md5sum,))
@@ -532,7 +469,19 @@ class IMAPAutoSorter:
                 msg = email.message_from_string(raw_header)
                 print("---------- Source: subject: %s" % msg['Subject'])
                 message_id = (msg.get('Message-ID', '') or '').strip()
-                trimmed_header = self.return_header(raw_header)
+                trimmed_header = normalize_header(
+                    mail_txt=raw_header,
+                    exclude_headers=self.exclude_headers,
+                    headers_skip_re=self.headers_skip_re,
+                    chomp_header=self.chomp_header,
+                    headerIsX=self.headerIsX,
+                    xinclude=self.xinclude,
+                    dkim_just_d=self.dkim_just_d,
+                    exclude_received_from_localhost=self.exclude_received_from_localhost,
+                    weight_headers_re=self.weight_headers_re,
+                    weight_headers_by=self.weight_headers_by,
+                )
+
                 self.logger.info("* New message from: %s, Message-ID: %s", msg['From'], message_id)
                 self.logger.info(trimmed_header)
 
@@ -555,17 +504,15 @@ class IMAPAutoSorter:
                     imap.expunge()
                     continue
 
-                # Cache distances once per folder (threshold-independent)
-                dist_cache = {f: self.sync_and_distance(imap, f, source_hexdigest, dry_run, debug, quiet)
-                              for f in self.imap_folders}
-
-                base_T = self.threshold
+                # Cache distances once and use engine to decide winner
+                dist_cache = {
+                    f: self.sync_and_distance(imap, f, source_hexdigest, dry_run, debug, quiet)
+                    for f in self.imap_folders
+                }
                 tie_ratio_gap = getattr(self, "tie_ratio_gap", 0.10)
-
-                # Use engine to decide winner (reduces lines here)
                 winning_folder, winning_score = decide_winner(
                     dist_cache,
-                    base_threshold=base_T,
+                    base_threshold=self.threshold,
                     min_score=self.min_score,
                     min_average=self.min_average,
                     tie_ratio_gap=tie_ratio_gap,
@@ -582,7 +529,8 @@ class IMAPAutoSorter:
                     typ, data = imap.uid('MOVE', email_uid, '"%s"' % winning_folder)
                     if typ == 'OK':
                         dst_uid = None
-                        info = self._extract_copyuid((typ, data)) or self._extract_copyuid(('OK', getattr(imap, 'untagged_responses', {}).get('OK', [])))
+-                        info = self._extract_copyuid((typ, data)) or self._extract_copyuid(('OK', getattr(imap, 'untagged_responses', {}).get('OK', [])))
++                        info = extract_copyuid((typ, data)) or extract_copyuid(('OK', getattr(imap, 'untagged_responses', {}).get('OK', [])))
                         if info:
                             _uidv, src_uids, dst_uids = info
                             try:
@@ -693,13 +641,13 @@ class IMAPAutoSorter:
             return False
 
     def idle_or_poll(self, imap: imaplib.IMAP4_SSL, folder: str, poll_interval: int = 60, idle_timeout: int = 900) -> None:
-        if self.supports_idle(imap):
+        if imap_supports_idle(imap, self.logger):
             while True:
                 if self.todo_count(imap) > 0:
                     break
                 self.logger.info("Waiting for new mail using IMAP IDLE...")
-                if self.idle_wait(imap, folder, timeout=idle_timeout):
-                    self.logger.info("IMAP IDLE: new mail detected.")
+                if not imap_idle_wait(imap, self.todo_folder, timeout=idle_timeout, logger=self.logger):
+                    self.logger.info("IMAP IDLE: no new mail.")
                     break
         else:
             while True:

@@ -6,9 +6,9 @@ Refactor rules
    - remove overkill error handling.
 """
 
-from typing import List
 import re
 import email
+from typing import List
 
 def normalize_header(
     mail_txt: str,
