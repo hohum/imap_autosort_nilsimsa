@@ -82,6 +82,7 @@ import os
 import sys
 import random
 import re
+import select
 import time
 from typing import Dict, List, Tuple
 
@@ -137,10 +138,10 @@ class IMAPAutoSorter:
         self.todo_folder = self.config.get("imap", "todo")
         self.new_folder = self.config.get("imap", "new")
         self.imap_folders = self._get_list("imap", "folders")
-        # For LLM
+        # For LLM (instantiate after logger is created)
         self.sender_skip_llm = self._get_list("openai", "sender_skip_llm")
         self.api_key = self.config.get("openai", "api_key", fallback=None)
-        self.llm = LLMClassifier(self.api_key, self.sender_skip_llm, logger=self.logger)
+        #        self.llm = LLMClassifier(self.api_key, self.sender_skip_llm, logger=self.logger)
 
         # Nilsimsa thresholds & knobs
         self.threshold = self.config.getint("nilsimsa", "threshold", fallback=50)
@@ -151,27 +152,6 @@ class IMAPAutoSorter:
         self.headers_skip = self._get_list("nilsimsa", "headers_skip")
         self.weight_headers_by = self.config.getint("nilsimsa", "weight_headers_by", fallback=1)
         self.xinclude = self._get_list("nilsimsa", "xinclude")
-        self.sender_skip_llm = self._get_list("openai", "sender_skip_llm")
-
-        # Archive
-        self.archive_folder = self.config.get("archive", "folder", fallback=None)
-        self.archive_after = self.config.getint("archive", "after", fallback=0)
-        self.just_delete = self._get_list("archive", "justdelete") if self.config.has_option("archive", "justdelete") else None
-        self.trash_folder = self.config.get("archive", "trash", fallback=None)
-
-        # Regexes (kept same semantics; precompiled for clarity/speed)
-        self.exclude_headers = re.compile(r"^(Date|Message-ID|X-.*Mailscanner.*|X-Amavis-.*|X-Spam-.*|X-Virus-.*|ARC-.*)$", re.I)
-        self.no_dates_received = re.compile(r";\s+.*$", re.M | re.I)
-        # Extract just the d= token from DKIM-Signature values
-        self.dkim_just_d = re.compile(r"(?is)\A.*?\b(d=[^;\s]+).*\Z")
-        self.chomp_header = re.compile(r"[\r\n]+\s*", re.M)
-        self.exclude_received_from_localhost = re.compile(r"^from\s+(localhost|marcsnet\.com)\s+", re.I)
-        weight_headers_pattern = r"^(" + "|".join(self.weight_headers) + r")$" if self.weight_headers else r"^$"
-        self.weight_headers_re = re.compile(weight_headers_pattern, re.I)
-        headers_skip_pattern = r"^(" + "|".join(self.headers_skip) + r")$" if self.headers_skip else r"^$"
-        self.headers_skip_re = re.compile(headers_skip_pattern, re.I)
-        self.headerIsX = re.compile(r"^x-", re.I)
-
         # Logger
         self.logger = setup_logger("imap_nilsimsa", log_dir=self.log_dir, logfile=self.logfile, enable_syslog=self.enable_syslog)
         # Now that logger exists, init LLM
@@ -206,37 +186,7 @@ class IMAPAutoSorter:
 
     # ------------------------------ misc utils ------------------------------
 
-    def _parse_uid_set(self, s: str) -> List[int]:
-        out: List[int] = []
-        s = (s or '').strip()
-        if not s:
-            return out
-        for part in s.replace(',', ' ').split():
-            if ':' in part:
-                a, b = map(int, part.split(':', 1))
-                out.extend(range(min(a, b), max(a, b) + 1))
-            else:
-                out.append(int(part))
-        return out
-
-    def _extract_copyuid(self, result):
-        typ, data = result or (None, None)
-        pieces: list[str] = []
-        for d in (data or []):
-            if isinstance(d, (bytes, bytearray)):
-                pieces.append(d.decode('utf-8', 'ignore'))
-            elif isinstance(d, tuple) and len(d) > 1 and isinstance(d[1], (bytes, bytearray)):
-                pieces.append(d[1].decode('utf-8', 'ignore'))
-            elif isinstance(d, str):
-                pieces.append(d)
-        joined = ' '.join(pieces)
-        m = re.search(r'\[(COPYUID|APPENDUID)\s+(\d+)\s+([^\s]+)\s+([^\]]+)\]', joined)
-        if not m:
-            return None
-        uidvalidity = int(m.group(2))
-        src = self._parse_uid_set(m.group(3))
-        dst = self._parse_uid_set(m.group(4))
-        return uidvalidity, src, dst
+    # (duplicate parse/extract helpers removed; using imap_utils.extract_copyuid)
 
     def _get_list(self, section: str, key: str) -> List[str]:
         """Parse comma-separated config option into a trimmed list."""
@@ -600,51 +550,6 @@ class IMAPAutoSorter:
             self._process_core(imap, dry_run, debug, quiet)
         finally:
             self.imap_helper.close()
-
-    def supports_idle(self, imap: imaplib.IMAP4_SSL) -> bool:
-        try:
-            typ, data = imap.capability()
-            return typ == "OK" and data and (b"IDLE" in b" ".join(data).upper())
-        except Exception as e:
-            if hasattr(self, "logger") and self.logger:
-                self.logger.warning("Error checking IMAP capabilities: %s", e)
-        return False
-
-    def idle_wait(self, imap: imaplib.IMAP4_SSL, folder: str, timeout: int = 900) -> bool:
-        try:
-            imap.select(folder, readonly=False)
-            if not hasattr(imap, 'sock'):
-                return False
-            imap.send(b'IDLE\r\n')
-            r, _, _ = select.select([imap.sock], [], [], timeout)
-            if r:
-                _ = imap.sock.recv(4096)
-                imap.send(b'DONE\r\n')
-                imap._get_response()
-                return True
-            imap.send(b'DONE\r\n')
-            imap._get_response()
-            return False
-        except Exception as e:
-            if hasattr(self, "logger") and self.logger:
-                self.logger.warning("IMAP IDLE failed: %s", e)
-            return False
-
-    def idle_or_poll(self, imap: imaplib.IMAP4_SSL, folder: str, poll_interval: int = 60, idle_timeout: int = 900) -> None:
-        if imap_supports_idle(imap, self.logger):
-            while True:
-                if self.todo_count(imap) > 0:
-                    break
-                self.logger.info("Waiting for new mail using IMAP IDLE...")
-                if not imap_idle_wait(imap, self.todo_folder, timeout=idle_timeout, logger=self.logger):
-                    self.logger.info("IMAP IDLE: no new mail.")
-                    break
-        else:
-            while True:
-                if self.todo_count(imap) > 0:
-                    break
-                self.logger.info("Waiting for new mail (polling every %ds)...", poll_interval)
-                time.sleep(poll_interval)
 
     def process_with_idle(self, dry_run=False, debug=False, quiet=False, loop=False, idle_timeout=900, poll_interval=60):
         print("\n-----\nProcessing at %s" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
