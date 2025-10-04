@@ -83,7 +83,6 @@ Guidance:
                     {"role": "system", "content": self.SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0,
                 top_p=1,
                 presence_penalty=0,
                 frequency_penalty=0,
