@@ -1,6 +1,6 @@
 import math
-from typing import Dict, List, Tuple, Optional
 import logging
+from typing import Dict, List, Tuple, Optional
 
 def score_folder(
     folder: str,
@@ -10,7 +10,6 @@ def score_folder(
     debug: bool = False,
     quiet: bool = False,
 ) -> Tuple[float, float]:
-    """Compute total_score and average for a folder given distances and threshold."""
     over_threshold = [x for x in distances if x > threshold]
     if not over_threshold:
         if not quiet:
@@ -24,7 +23,6 @@ def score_folder(
     if scored_count > 1:
         total_score *= math.log10(scored_count)
 
-    # Summaries (over-threshold only)
     n_over = len(over_threshold)
     ot_sorted = sorted(over_threshold)
     ot_min, ot_max = ot_sorted[0], ot_sorted[-1]
@@ -34,7 +32,6 @@ def score_folder(
     idx = lambda p: int(p * (n_over - 1))
     ot_p90, ot_p95, ot_p99 = ot_sorted[idx(0.90)], ot_sorted[idx(0.95)], ot_sorted[idx(0.99)]
 
-    # Longest run of consecutive over-threshold values in the original order.
     run = best_run = 0
     for v in distances:
         if v >= threshold:
@@ -84,7 +81,6 @@ def decide_winner(
     debug: bool = False,
     quiet: bool = False,
 ) -> Tuple[Optional[str], float]:
-    """Run the threshold ladder and choose a winner. Returns (folder or None, score)."""
     T = base_threshold
     winning_folder: Optional[str] = None
     winning_score = 0.0
@@ -148,6 +144,6 @@ def decide_winner(
             break
         else:
             T += 5
-            logger.info("LADDER (ratio gap %.3f < %.3f) → raise T to %d", ratio_gap, tie_ratio_gap, T)
+            logger.info("LADDER (ratio gap %.3f < %.3f) → raise T to %d", ratio_gap, tie_ratio_gap, T)r.info("LADDER (ratio gap %.3f < %.3f) → raise T to %d", ratio_gap, tie_ratio_gap, T)
 
     return winning_folder, winning_score
