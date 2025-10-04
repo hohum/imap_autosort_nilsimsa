@@ -98,6 +98,4 @@ Guidance:
             if self.logger:
                 self.logger.error("GPT classification error: %s", e)
             return '[{"cta":"Notice LLM classification error"},{"label":["Unclassified:1.00"]}]', False
-                self.logger.error("GPT classification error: %s", e)
-            return '[{"cta":"Notice LLM classification error"},{"label":["Unclassified:1.00"]}]', False
 

@@ -1,11 +1,3 @@
-f"""
-Refactor rules
-   - Strictly keep functionality identical,
-   - reduce duplication/lines.
-   - maintrin code clarify modifying/adding/deleting comments to aid in maintainability.
-   - remove overkill error handling.
-"""
-
 from __future__ import annotations
 import re
 import email
