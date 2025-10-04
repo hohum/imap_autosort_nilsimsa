@@ -135,11 +135,10 @@ class IMAPAutoSorter:
         self.todo_folder = self.config.get("imap", "todo")
         self.new_folder = self.config.get("imap", "new")
         self.imap_folders = self._get_list("imap", "folders")
-        # For LLMClassifier
+        # For LLM
         self.sender_skip_llm = self._get_list("openai", "sender_skip_llm")
-        # LLM classifier (shared in llm.py)
-        api_key = self.config.get("openai", "api_key", fallback=None)
-        self.llm = LLMClassifier(api_key, self.sender_skip_llm, logger=None)
+        self.api_key = self.config.get("openai", "api_key", fallback=None)
+        self.llm = LLMClassifier(self.api_key, self.sender_skip_llm, logger=self.logger)
 
         # Nilsimsa thresholds & knobs
         self.threshold = self.config.getint("nilsimsa", "threshold", fallback=50)
@@ -171,15 +170,8 @@ class IMAPAutoSorter:
         self.headers_skip_re = re.compile(headers_skip_pattern, re.I)
         self.headerIsX = re.compile(r"^x-", re.I)
 
-        # Logger (base + child)
-        base_logger = setup_logger(
-            "imap_nilsimsa",
-            log_dir=log_dir,
-            logfile=self.logfile,
-            enable_syslog=self.config.getboolean('general', 'enable_syslog', fallback=False),
-            syslog_address=self.config.get('general', 'syslog_address', fallback='/dev/log'),
-        )
-        self.logger = base_logger.getChild(self.__class__.__name__)
+        # Logger
+        self.logger = setup_logger("imap_nilsimsa", log_dir=self.log_dir, logfile=self.logfile, enable_syslog=self.enable_syslog)
 
         # Database config & helper
         db_backend = self.config.get("database", "db_backend", fallback="mysql").lower()
@@ -484,12 +476,11 @@ class IMAPAutoSorter:
                 cats, is_suss = self.llm._classify_email(
                     f"From: {msg.get('From','')}\nSubject: {msg.get('Subject','')}"
                 )
-                try:
-                    m = re.findall(r'"(?:Spam|Phishing Suspected):(\d+\.\d{2})"', cats)
-                    if m and max(map(float, m)) >= 0.10:
+                if is_suss:
+                    try:
                         imap.uid('STORE', email_uid, '+FLAGS', '($label1)')
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
                 try:
                     source_hexdigest = Nilsimsa(f"X-LLM-Categories: {cats}\n{trimmed_header}").hexdigest()
