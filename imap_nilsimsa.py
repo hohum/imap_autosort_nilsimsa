@@ -197,8 +197,9 @@ class IMAPAutoSorter:
         self.todo_folder = self.config.get("imap", "todo")
         self.new_folder = self.config.get("imap", "new")
         self.imap_folders = self._get_list("imap", "folders")
+        # Needed before LLMClassifier init
+        self.sender_skip_llm = self._get_list("openai", "sender_skip_llm")
 
-        # OpenAI client (optional)
         # LLM classifier (shared in llm.py)
         api_key = self.config.get("openai", "api_key", fallback=None)
         self.llm = LLMClassifier(api_key, self.sender_skip_llm, logger=None)
