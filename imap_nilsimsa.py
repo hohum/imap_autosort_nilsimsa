@@ -130,6 +130,8 @@ class IMAPAutoSorter:
             or self.config.get('general', 'logpath', fallback='logs')
         ).strip().rstrip('/')
         self.logfile = self.config.get('general', 'logfile', fallback=None)
+        self.log_dir = log_dir
+        self.enable_syslog = self.config.getboolean('general', 'enable_syslog', fallback=False)
 
         # IMAP folders & lists
         self.todo_folder = self.config.get("imap", "todo")
@@ -172,6 +174,8 @@ class IMAPAutoSorter:
 
         # Logger
         self.logger = setup_logger("imap_nilsimsa", log_dir=self.log_dir, logfile=self.logfile, enable_syslog=self.enable_syslog)
+        # Now that logger exists, init LLM
+        self.llm = LLMClassifier(self.api_key, self.sender_skip_llm, logger=self.logger)
 
         # Database config & helper
         db_backend = self.config.get("database", "db_backend", fallback="mysql").lower()
@@ -191,7 +195,7 @@ class IMAPAutoSorter:
         self.db = DatabaseHelper(
             mysql_pass=mysql_pass,
             version=self.version,
-            logger=base_logger.getChild("DatabaseHelper"),
+            logger=self.logger.getChild("DatabaseHelper"),
             host=db_host,
             user=db_user,
             db=db_name,               # file path when sqlite; schema name when mysql
