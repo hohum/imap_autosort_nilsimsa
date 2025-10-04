@@ -94,6 +94,7 @@ from nilsimsa import Nilsimsa, compare_hexdigests
 from openai import OpenAI
 from db import DatabaseHelper
 from header_normalizer import normalize_header
+from sorter_engine import decide_winner  # new
 
 try:  # used only when db_backend=mysql; keep import optional
     import mysql.connector  # noqa: F401
@@ -666,65 +667,20 @@ class IMAPAutoSorter:
 
                 base_T = self.threshold
                 tie_ratio_gap = getattr(self, "tie_ratio_gap", 0.10)
-                T = base_T
-                winning_folder, winning_score = self.new_folder, 0.0
 
-                while True:
-                    stats: dict[str, Tuple[float, float]] = {}
-                    sum_av = 0.0
-                    best_pair: Tuple[float, float] | None = None  # (score, avg), best by (avg, then score)
-                    for f, d in dist_cache.items():
-                        sc, av = self.score_folder(f, d, T, debug, quiet)
-                        stats[f] = (sc, av)
-                        sum_av += max(0.0, av)
-                        if (best_pair is None) or (av, sc) > (best_pair[1], best_pair[0]):
-                            best_pair = (sc, av)
-
-                    if sum_av <= 0.0:
-                        self.logger.info("T=%d | no over-threshold signal; skipping ladder", T)
-                        # Report only which minimums failed using cached best_pair
-                        fails = "none"
-                        if best_pair is not None:
-                            bs, ba = best_pair
-                            parts = []
-                            if bs <= self.min_score:
-                                parts.append(f"score {bs:.2f}/{self.min_score:.2f}")
-                            if ba <= self.min_average:
-                                parts.append(f"avg {ba:.2f}/{self.min_average:.2f}")
-                            fails = "; ".join(parts) or "none"
-                        self.logger.info("RESOLVE @T=%d | no folder clears minimums; fails: %s; using new_folder", T, fails)
-                        break
-
-                    ranked = sorted(stats.items(), key=lambda it: (it[1][1], it[1][0]), reverse=True)
-                    lead_f, (lead_sc, lead_av) = ranked[0]
-                    runner = ranked[1] if len(ranked) > 1 else None
-
-                    r1 = (lead_av / sum_av) if sum_av > 0 else 0.0
-                    r2 = ((runner[1][1] / sum_av) if (sum_av > 0 and runner) else 0.0)
-                    ratio_gap = r1 - r2
-                    self.logger.info("T=%d | leader=%s av=%.2f sc=%.2f | r1=%.3f r2=%.3f gap=%.3f",
-                                     T, lead_f, lead_av, lead_sc, r1, r2, ratio_gap)
-
-                    if (not runner) or (ratio_gap >= tie_ratio_gap) or (T >= 125):
-                        if lead_sc > self.min_score and lead_av > self.min_average:
-                            winning_folder, winning_score = lead_f, lead_sc
-                            self.logger.info(
-                                "RESOLVE @T=%d | winner=%s av=%.2f sc=%.2f (gap>=%.3f or no runner)",
-                                T, winning_folder, lead_av, lead_sc, tie_ratio_gap,
-                            )
-                        else:
-                            # Only list the thresholds that were not met for the leader
-                            parts = []
-                            if lead_sc <= self.min_score:
-                                parts.append(f"score {lead_sc:.2f}/{self.min_score:.2f}")
-                            if lead_av <= self.min_average:
-                                parts.append(f"avg {lead_av:.2f}/{self.min_average:.2f}")
-                            fails = "; ".join(parts) or "none"
-                            self.logger.info("RESOLVE @T=%d | no folder clears minimums; fails: %s; using new_folder", T, fails)
-                        break
-                    else:
-                        T += 5
-                        self.logger.info("LADDER (ratio gap %.3f < %.3f) → raise T to %d", ratio_gap, tie_ratio_gap, T)
+                # Use engine to decide winner (reduces lines here)
+                winning_folder, winning_score = decide_winner(
+                    dist_cache,
+                    base_threshold=base_T,
+                    min_score=self.min_score,
+                    min_average=self.min_average,
+                    tie_ratio_gap=tie_ratio_gap,
+                    logger=self.logger,
+                    debug=debug,
+                    quiet=quiet,
+                )
+                if not winning_folder:
+                    winning_folder, winning_score = self.new_folder, 0.0
 
                 if not dry_run:
                     print("* Moving message to %s" % winning_folder)
