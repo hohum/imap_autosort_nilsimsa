@@ -56,7 +56,7 @@ def normalize_header(
                 value = re.sub(r' \(.*?\) by ', ' by ', value)
                 add = f"{header}: {value}"
             elif header == 'DKIM-Signature':
-                add = f"{header}: {dkim_just_d.sub(r'\\1', value)}"
+                add = f"{header}: {dkim_just_d.sub(r'\1', value)}"
             else:
                 add = f"{header}: {value}"
 
