@@ -91,7 +91,7 @@ from typing import Dict, List, Tuple
 
 from rfc5424_logger import RFC5424Formatter
 from nilsimsa import Nilsimsa, compare_hexdigests
-from openai import OpenAI
+from llm import LLMClassifier
 from db import DatabaseHelper
 from header_normalizer import normalize_header
 from sorter_engine import decide_winner  # new
@@ -199,14 +199,9 @@ class IMAPAutoSorter:
         self.imap_folders = self._get_list("imap", "folders")
 
         # OpenAI client (optional)
-        api_key = (self.config.get("openai", "api_key", fallback=None) or '').strip()
-        self.client = None
-        if api_key:
-            try:
-                self.client = OpenAI(api_key=api_key)
-            except Exception as e:
-                self.client = None
-                # logger not ready yet; ignore
+        # LLM classifier (shared in llm.py)
+        api_key = self.config.get("openai", "api_key", fallback=None)
+        self.llm = LLMClassifier(api_key, self.sender_skip_llm, logger=None)
 
         # Nilsimsa thresholds & knobs
         self.threshold = self.config.getint("nilsimsa", "threshold", fallback=50)
@@ -357,40 +352,6 @@ class IMAPAutoSorter:
 
     # ------------------------------ core: sync & distance ------------------------------
 
-    def _classify_email(self, from_addr: str, subject: str) -> str:
-        """Call OpenAI unless sender matches configured globs; log short result."""
-        if any(fnmatch.fnmatch((from_addr or "").lower(), pat.lower()) for pat in self.sender_skip_llm):
-            if self.logger:
-                self.logger.info("LLM skipped for sender %s (sender_skip_llm matched)", from_addr)
-            return '[{"cta":"Sender skipped"},{"label":["SenderSkipped:1.00"]}]'
-
-        if not self.client:
-            return '[{"cta":"Notice LLM not configured"},{"label":["Unclassified:1.00"]}]'
-
-        prompt = (
-            f"From: {from_addr}\nSubject: {subject}\n\n"
-            "Return ONLY one plain-text JSON-like string: "
-            "'[{""cta"": ""...""}, {""label"": [""X:0.00"", ""Y:0.00"", ""Z:0.00"", ""A:0.00"", ""B:0.00""]}]'\n"
-            "Rules: CTA 3–10 words, imperative; labels ≥5 noun phrases with probs summing to 1.00."
-        )
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-5-mini",
-                messages=[
-                    {"role": "system", "content": "You are an email intent detector."},
-                    {"role": "user", "content": prompt},
-                ],
-                timeout=60,
-            )
-            result = (response.choices[0].message.content or "").strip()
-            if self.logger:
-                self.logger.info("ChatGPT API response: %s", result)
-            return result
-        except Exception as e:  # keep tolerant; produce a deterministic fallback
-            if self.logger:
-                self.logger.error("GPT classification error: %s", e)
-            return '[{"cta":"Notice LLM classification error"},{"label":["Unclassified:1.00"]}]'
-
     def sync_and_distance(
         self,
         imap: imaplib.IMAP4_SSL,
@@ -493,7 +454,9 @@ class IMAPAutoSorter:
                         chosen = next((c for (_id, _uid, _folder, c, _hex) in md5_rows if c and ('Unclassified' not in c)), None)
                         if not chosen:
                             msg = email.message_from_string(raw_header)
-                            chosen = self._classify_email(msg.get('From',''), msg.get('Subject',''))
+                            chosen, _ = self.llm._classify_email(
+                                f"From: {msg.get('From','')}\nSubject: {msg.get('Subject','')}"
+                            )
                         cats = chosen
                         try:
                             target_hexdigest = Nilsimsa(f"X-LLM-Categories: {cats}\n{trimmed_header}").hexdigest()
@@ -572,7 +535,9 @@ class IMAPAutoSorter:
                 self.logger.info("* New message from: %s, Message-ID: %s", msg['From'], message_id)
                 self.logger.info(trimmed_header)
 
-                cats = self._classify_email(msg['From'], msg['Subject'])
+                cats, is_suss = self.llm._classify_email(
+                    f"From: {msg.get('From','')}\nSubject: {msg.get('Subject','')}"
+                )
                 try:
                     m = re.findall(r'"(?:Spam|Phishing Suspected):(\d+\.\d{2})"', cats)
                     if m and max(map(float, m)) >= 0.10:
