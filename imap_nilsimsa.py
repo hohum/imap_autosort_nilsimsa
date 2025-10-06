@@ -394,7 +394,7 @@ class IMAPAutoSorter:
             self.logger.info(f"{len(mail_db)} records for cleanup in DB folder[{folder}]")
         for email_uid in list(mail_db.keys()):
             if not quiet:
-                self.status(0, len(mail_db), 'Deleting moved messages ')
+                print(f"Deleting moved {len(mail_db)} messages")
             if not dry_run:
                 self.db.execute("DELETE FROM nilsimsa WHERE uid = %s AND folder = %s", (email_uid, folder))
             else:
